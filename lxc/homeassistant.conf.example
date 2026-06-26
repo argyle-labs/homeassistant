@@ -1,0 +1,24 @@
+# Proxmox LXC config for Home Assistant Container — /etc/pve/lxc/<vmid>.conf
+#
+# Home Assistant runs as a Docker container inside the LXC, so nesting + keyctl
+# are required. No GPU passthrough is needed. For Zigbee/Z-Wave USB sticks, add
+# a device passthrough line for the serial adapter (see the commented example).
+
+arch: amd64
+cores: 2
+memory: 2048
+swap: 512
+hostname: homeassistant
+ostype: debian
+rootfs: local-lvm:vm-<vmid>-disk-0,size=16G
+net0: name=eth0,bridge=vmbr0,ip=dhcp,firewall=1
+
+# Required for Docker-in-LXC.
+features: nesting=1,keyctl=1
+
+# Persistent Home Assistant /config volume.
+mp0: /opt/homeassistant/config,mp=/opt/homeassistant/config
+
+# ─── Optional: Zigbee/Z-Wave USB stick passthrough ────────────────────────────
+# Find the device on the host: ls -l /dev/serial/by-id/
+# dev0: /dev/serial/by-id/usb-<your-adapter>,gid=20

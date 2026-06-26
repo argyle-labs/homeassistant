@@ -1,0 +1,13 @@
+# Minimal Home Assistant Container deploy: host networking + persistent /config.
+# No USB/Bluetooth passthrough. Good for VMs or pure-network integrations.
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TZ: Etc/UTC
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /opt/homeassistant/config:/config

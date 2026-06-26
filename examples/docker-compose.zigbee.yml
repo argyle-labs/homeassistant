@@ -1,0 +1,16 @@
+# Home Assistant Container with a Zigbee/Z-Wave USB stick passed through.
+# Find your adapter path on the host: ls -l /dev/serial/by-id/
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TZ: Etc/UTC
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /opt/homeassistant/config:/config
+    devices:
+      # Replace with your adapter's stable by-id path.
+      - /dev/serial/by-id/usb-Silicon_Labs_zigbee-if00-port0:/dev/ttyUSB0
