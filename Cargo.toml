@@ -1,0 +1,51 @@
+[package]
+name = "homeassistant"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "homeassistant"
+path = "src/lib.rs"
+# `cdylib` is the orca plugin artifact orca's `plugin-loader` `dlopen`s;
+# `rlib` retains the in-crate `#[cfg(test)]` harness + lets the workspace use it
+# as a normal Rust lib.
+crate-type = ["cdylib", "rlib"]
+
+# Home Assistant plugin. Pure HTTP/REST client + orca-managed endpoint registry
+# (`home-assistant.{list,detail,create,update,delete}` CRUD) plus the
+# entity/service tool surface and the install/update/backup/restore lifecycle.
+# There is no upstream OpenAPI spec to codegen against — Home Assistant's REST
+# API is small and hand-modeled here — so this crate has no build.rs / specs/.
+
+[dependencies]
+# The SOLE orca dependency. Every external crate the plugin needs — serde,
+# serde_json, schemars, clap, chrono, urlencoding, reqwest (via the toolkit's
+# `http` transport) — is reached through `plugin_toolkit::*` / its prelude or
+# injected by the `#[orca_tool]`/`endpoint_resource!` macros. The plugin source
+# names no external crate except `abi_stable` below.
+#
+# Pinned to the orca rc tag that carries the plugin-toolkit surface. Until that
+# rc is cut, the committed `[patch]` in `.cargo/config.toml` resolves this to the
+# local in-tree toolkit at ../orca.
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", tag = "v0.0.8-rc.8" }
+
+# The ONE genuine non-orca dep: `#[export_root_module]` expands to bare
+# `::abi_stable` paths in this crate's root (the cdylib FFI boundary the loader
+# dlopens), so it can't route through the toolkit. Pinned to the orca workspace
+# version (0.11) so the layout hash baked into the cdylib matches what orca's
+# plugin-loader checks at load time.
+abi_stable = "0.11"
+
+[dev-dependencies]
+# Dev-only: serde_json's `json!` for mock bodies reaches through the toolkit,
+# same as the lib's in-crate tests. Not a runtime dep.
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", tag = "v0.0.8-rc.8" }
+tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+tempfile = "3"
+
+# Match orca's workspace lint floor: discarding a Result/Option via
+# `let _ = ...` was a load-bearing past incident, so keep it a hard error here
+# too — the plugin must stay portable back into the orca workspace.
+[lints.clippy]
+let_underscore_must_use = "deny"

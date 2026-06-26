@@ -1,0 +1,13 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    network_mode: host
+    restart: unless-stopped
+    privileged: true            # required for Bluetooth / USB (Zigbee/Z-Wave) passthrough
+    environment:
+      TZ: Etc/UTC
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro  # host D-Bus for Bluetooth integrations
+      - /opt/homeassistant/config:/config

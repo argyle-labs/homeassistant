@@ -1,0 +1,15 @@
+# Home Assistant Container with host Bluetooth (BLE integrations).
+# Requires privileged mode + host D-Bus so HA can talk to BlueZ.
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    network_mode: host
+    restart: unless-stopped
+    privileged: true
+    environment:
+      TZ: Etc/UTC
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+      - /opt/homeassistant/config:/config
