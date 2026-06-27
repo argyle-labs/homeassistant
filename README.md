@@ -1,6 +1,6 @@
 # homeassistant
 
-A first-class [orca](https://github.com/scottdkey/orca) plugin for
+A first-class [orca](https://github.com/argyle-labs/orca) plugin for
 [Home Assistant](https://www.home-assistant.io/) — plus curl-bootstrappable
 deploy assets. The plugin owns the full lifecycle (install, update,
 backup/restore) and the live API surface (entities, single-entity state,
