@@ -78,6 +78,18 @@ line.
 
 ---
 
+## Podman / Compose
+
+Home Assistant needs `privileged`, host networking, and host D-Bus, so run the
+same [`compose.yml`](compose.yml) under **rootful** Podman:
+
+```sh
+sudo podman compose -f compose.yml up -d
+```
+
+Persist across reboots with `sudo podman generate systemd --new --name
+homeassistant > /etc/systemd/system/homeassistant.service`.
+
 ## orca plugin
 
 The crate in `src/` is an orca plugin. Its **only** orca dependency is
