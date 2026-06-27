@@ -62,7 +62,9 @@ async fn service_call_merges_entity_id_into_payload() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/services/light/turn_on"))
-        .and(body_json(json!({"entity_id": "light.lr", "brightness": 200})))
+        .and(body_json(
+            json!({"entity_id": "light.lr", "brightness": 200}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&server)
         .await;

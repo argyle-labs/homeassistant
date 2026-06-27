@@ -158,7 +158,11 @@ async fn ha_install(args: HaInstallArgs, _ctx: &ToolCtx) -> Result<HaInstallOutp
                 .clone()
                 .unwrap_or_else(|| "compose.yml".to_string());
             let mut cmd = Command::new("docker");
-            cmd.arg("compose").arg("-f").arg(&compose).arg("up").arg("-d");
+            cmd.arg("compose")
+                .arg("-f")
+                .arg(&compose)
+                .arg("up")
+                .arg("-d");
             run(&mut cmd).await?
         }
         Runtime::Lxc => {
@@ -478,7 +482,10 @@ mod tests {
         .unwrap();
 
         assert!(restore_target.join("configuration.yaml").is_file());
-        assert!(restore_target.join(".storage").join("core.config").is_file());
+        assert!(restore_target
+            .join(".storage")
+            .join("core.config")
+            .is_file());
         // deps was excluded from the archive
         assert!(!restore_target.join("deps").exists());
     }
