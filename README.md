@@ -1,6 +1,6 @@
 # homeassistant
 
-A first-class [orca](https://github.com/scottdkey/orca) plugin for
+A first-class [orca](https://github.com/argyle-labs/orca) plugin for
 [Home Assistant](https://www.home-assistant.io/) — plus curl-bootstrappable
 deploy assets. The plugin owns the full lifecycle (install, update,
 backup/restore) and the live API surface (entities, single-entity state,
@@ -77,6 +77,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/scottdkey/homeassistant/main
 line.
 
 ---
+
+## Podman / Compose
+
+Home Assistant needs `privileged`, host networking, and host D-Bus, so run the
+same [`compose.yml`](compose.yml) under **rootful** Podman:
+
+```sh
+sudo podman compose -f compose.yml up -d
+```
+
+Persist across reboots with `sudo podman generate systemd --new --name
+homeassistant > /etc/systemd/system/homeassistant.service`.
 
 ## orca plugin
 
