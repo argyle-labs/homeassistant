@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon-256.png" width="120" alt="homeassistant" />
+</p>
+
 # homeassistant
 
 A first-class [orca](https://github.com/argyle-labs/orca) plugin for
