@@ -4,258 +4,43 @@
 
 # homeassistant
 
-A first-class [orca](https://github.com/argyle-labs/orca) plugin for
-[Home Assistant](https://www.home-assistant.io/) — plus curl-bootstrappable
-deploy assets. The plugin owns the full lifecycle (install, update,
-backup/restore) and the live API surface (entities, single-entity state,
-automations, service invocation) over Home Assistant's REST API.
+Home Assistant is an open-source home-automation platform for controlling and automating smart-home devices.
 
-Home Assistant is distributed as an official container image
-(`ghcr.io/home-assistant/home-assistant`). This repo does **not** rebuild Home
-Assistant — the deploy assets bring up the official image (Docker / Compose, or
-Docker-in-LXC on Proxmox) with persistent `/config`, and the orca plugin drives
-it. Home Assistant serves on `:8123`, config at `/config`.
+A first-party [orca](https://github.com/argyle-labs/orca) plugin (service-backend).
 
-## Two halves of one repo
-
-| Half | What it is |
-|---|---|
-| **Deploy assets** (`Dockerfile`, `compose.yml`, `lxc/`, `scripts/`, `examples/`) | Curl-bootstrappable install/update/backup payload — no git clone needed. |
-| **orca plugin** (`src/`, `Cargo.toml`) | A Rust orca plugin whose only orca dependency is `plugin-toolkit`. Exposes the lifecycle + API surface as `#[orca_tool]`s. |
-
-## Deployment Paths
-
-| Path | Use case |
-|---|---|
-| [Docker / Compose](#docker--compose) | Any Linux host or VM with Docker — preferred |
-| [Proxmox LXC](#proxmox-lxc) | Docker-in-LXC (nesting + keyctl) on Proxmox |
-| [orca tools](#orca-plugin) | Drive install/update/backup/restore + API surface through orca |
-
-## Specs
-
-| Resource | Value |
-|---|---|
-| CPU | 2 cores |
-| RAM | 2 GB |
-| Disk | 16 GB (rootfs) |
-| GPU | none required |
-
-Home Assistant Core is light. For Zigbee/Z-Wave pass through a USB adapter; for
-BLE integrations pass host Bluetooth (see `examples/`).
+This repo **ships a `compose.yml`** — run homeassistant **by hand, without orca** straight from it:
 
 ---
 
-## Docker / Compose
+## Run it without orca
 
 ```sh
-# Bring up the official image with a persistent /config volume.
-sudo install -d /opt/homeassistant/config
-sudo cp compose.yml /opt/homeassistant/compose.yml
-docker compose -f /opt/homeassistant/compose.yml up -d
-# → http://<host>.local:8123
+docker compose up -d
 ```
 
-Curl-bootstrap (no git clone):
+See [`compose.yml`](compose.yml) for the image, ports, volumes, and hardware/device mappings and `scripts/` for provisioning helpers. Upstream docs: <https://www.home-assistant.io/>.
+
+
+### Backup & restore
+
+Back up the config/data volume(s) above — that's the whole service state (stop the container first for a clean copy). Restore by putting them back and starting it.
+
+> With orca this is **`service.backup` / `service.restore`** — location-agnostic (docker / podman / lxc / vm), one command regardless of where homeassistant runs. No per-service backup script.
+
+## With orca
+
+orca drives this plugin through the single generic `service.*` surface — no per-plugin tools:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/argyle-labs/homeassistant/main/scripts/install.sh \
-  | bash -s -- stable      # channel: stable | beta | dev
+orca service.deploy homeassistant      # render + launch on any supported runtime
+orca service.status homeassistant      # health + rich diagnostics (typed payload)
+orca service.backup homeassistant      # location-agnostic backup (tar; PBS on Proxmox)
+orca service.configure homeassistant   # apply config via the upstream API
 ```
 
-`examples/` carries variants: `docker-compose.basic.yml` (network only),
-`docker-compose.zigbee.yml` (USB adapter passthrough),
-`docker-compose.bluetooth.yml` (privileged + host D-Bus).
+## Layout
 
-## Proxmox LXC
-
-Home Assistant runs as a Docker container inside the LXC, so the container needs
-`nesting=1,keyctl=1`. Run on the Proxmox host as root — no git clone needed:
-
-```sh
-bash <(curl -fsSL https://raw.githubusercontent.com/argyle-labs/homeassistant/main/lxc/provision.sh) \
-  <vmid> --hostname homeassistant --channel stable
-```
-
-`lxc/homeassistant.conf.example` documents the equivalent hand-written
-`/etc/pve/lxc/<vmid>.conf`, including an optional Zigbee/Z-Wave USB passthrough
-line.
-
----
-
-## Podman / Compose
-
-Home Assistant needs `privileged`, host networking, and host D-Bus, so run the
-same [`compose.yml`](compose.yml) under **rootful** Podman:
-
-```sh
-sudo podman compose -f compose.yml up -d
-```
-
-Persist across reboots with `sudo podman generate systemd --new --name
-homeassistant > /etc/systemd/system/homeassistant.service`.
-
-## orca plugin
-
-The crate in `src/` is an orca plugin. Its **only** orca dependency is
-`plugin-toolkit` (pinned to an orca rc tag; a committed `.cargo/config.toml`
-`[patch]` overrides it to a local `../orca` checkout for development).
-
-Home Assistant has no official OpenAPI spec and a small REST surface, so the
-client is hand-modeled in [`src/lib.rs`](src/lib.rs) — there is no codegen step,
-no `build.rs`, and no `specs/`.
-
-### Tool surface
-
-| Tool | Purpose |
-|---|---|
-| `home-assistant.{list,detail,create,update,delete}` | Endpoint registry CRUD (generated by `endpoint_resource!`). |
-| `home-assistant.entities` | List entities, optionally filtered by domain (`light`, `sensor`, …). |
-| `home-assistant.entity` | Single entity's current state. |
-| `home-assistant.automations` | List automations (entities in the `automation` domain). |
-| `home-assistant.service` | **Mutates state** — invoke an HA service (`light.turn_on`, …). |
-| `home-assistant.install` | Provision a Docker or LXC deployment. |
-| `home-assistant.update` | Channel-aware (`stable`/`beta`/`dev`) image/version bump. |
-| `home-assistant.backup` | Tar the `/config` volume to a destination directory. |
-| `home-assistant.restore` | Restore the `/config` volume from a tarball (`--from`). |
-
-Endpoints are registered by name and resolved at call time; the row (base URL +
-long-lived access token) syncs to every paired peer. Create a long-lived access
-token in Home Assistant under **Profile → Security → Long-lived access tokens**.
-
-### Build
-
-```sh
-git clone https://github.com/argyle-labs/homeassistant
-cd homeassistant
-# With an orca checkout at ../orca, the committed .cargo/config.toml patch
-# resolves plugin-toolkit locally; otherwise it resolves from the pinned rc tag.
-cargo build
-cargo test
-```
-
-### The two-dependency rule
-
-A compliant orca plugin's `[dependencies]` is **exactly two crates**:
-
-| Dep | Why it is allowed |
-|---|---|
-| `plugin-toolkit` | The single orca gateway. Every other crate the plugin would reach for — serde, serde_json, schemars, clap, chrono, uuid, reqwest, anyhow, tokio, tracing, urlencoding, rusqlite, and the domain/dispatch machinery — is re-exported through `plugin_toolkit::*` / its prelude, or injected by the `#[plugin_struct]` / `#[orca_tool]` / `endpoint_resource!` macros. The plugin source names **no** external crate through this dep. |
-| `abi_stable` | **The one genuine non-toolkit dependency, and it cannot be removed.** See below. |
-
-Everything else (the integration-test crate's deps — `tokio` / `wiremock` /
-`tempfile`) lives under `[dev-dependencies]` and is outside the rule: dev-deps
-never ship in the cdylib.
-
-### Why `abi_stable` is the unavoidable exception
-
-orca loads external plugins as **cdylibs it `dlopen`s at runtime** — not as
-statically linked crates. That crossing is a C-ABI FFI boundary, and the data
-that crosses it (the root module, the version header, the layout hashes the
-loader checks before it trusts the `.so`) must have a **guaranteed, stable memory
-layout**. Rust's native `repr(Rust)` gives no such guarantee across independent
-compilations, so the boundary types come from `abi_stable` (`RString`, `RStr`,
-`RResult`, `PrefixTypeTrait`, …).
-
-The decisive detail: `#[export_root_module]` — the attribute that emits the
-single symbol orca's loader looks up — **expands to bare `::abi_stable::*` paths
-in this crate's own root.** There is no source path for the toolkit to redirect
-and no `crate =` attribute to retarget; the macro hard-codes the crate name into
-generated code that lives *in the plugin*. So unlike serde/reqwest (whose paths
-the toolkit redirects), `abi_stable` genuinely must be a direct dep.
-
-It is pinned to **the same `abi_stable` version the toolkit uses** (`0.11`) so
-the layout hash baked into the cdylib matches what orca's `plugin-loader`
-validates at load time. A version skew here is not a compile error — it is a
-load-time rejection. Keep it in lockstep with the toolkit.
-
-The whole abi boundary is isolated to one file,
-[`src/abi_export.rs`](src/abi_export.rs): the only place `abi_stable` is named,
-the only place the JSON dispatch payload type is aliased, and the only place the
-`disallowed_types` lint is suppressed.
-
-### Authoring a fresh plugin from this template
-
-This repo is a canonical HTTP-class template (no codegen). To start a new
-`<name>` plugin:
-
-1. **Scaffold the crate.** Copy this repo's skeleton: `Cargo.toml`,
-   `.cargo/config.toml`, `src/abi_export.rs`, and a `src/` tree (`lib.rs`,
-   `tools.rs`, plus `lifecycle.rs` as the surface needs). Keep
-   `[lib] crate-type = ["cdylib", "rlib"]` — `cdylib` is the artifact orca loads;
-   `rlib` keeps the in-crate test harness.
-
-2. **Set `[dependencies]` to the two allowed crates** — `plugin-toolkit` (git
-   dep on the orca rc tag) and `abi_stable = "0.11"` — nothing else. Put test
-   tooling under `[dev-dependencies]`, including `plugin-toolkit` again if the
-   integration-test crate needs `serde_json::json!` for fixtures.
-
-3. **Write the surface against the toolkit only.** `use plugin_toolkit::prelude::*;`
-   for the common surface; reach `plugin_toolkit::http`,
-   `plugin_toolkit::serde_json`, `plugin_toolkit::urlencoding`, etc. explicitly
-   where the prelude doesn't cover it. Derive on hand-written arg/output types
-   with the explicit `#[derive(plugin_toolkit::serde::Serialize, …)] #[serde(crate
-   = "plugin_toolkit::serde")]` form (or `#[plugin_struct]`). **Do not** add a
-   `thiserror` dep — thiserror's derive emits bare `thiserror::` paths with no
-   `crate =` escape hatch, so hand-roll `Display` + `std::error::Error` + `From`
-   as `HaError` does in [`src/lib.rs`](src/lib.rs); `?` conversion rides anyhow's
-   blanket `From`.
-
-4. **Update `abi_export.rs` metadata** — change `target_software`,
-   `target_compat`, `orca_compat`, and `TOOL_PREFIX` to your `<name>.` namespace.
-   Leave the rest of the FFI plumbing as-is.
-
-5. **Prove the rule holds** before committing:
-   ```sh
-   cargo build && cargo clippy --all-targets -- -D warnings && cargo test
-   cargo tree -e normal --depth 1   # MUST show only plugin-toolkit + abi_stable
-   ```
-   Any third crate under `[dependencies]` is a toolkit gap — file it against
-   `plugin-toolkit` and route through it rather than adding the dep here.
-
----
-
-## Backup & Restore
-
-Two equivalent paths — the orca tools and the shell scripts share the same
-archive format (`homeassistant-config-YYYYMMDD-HHMMSS.tar.gz`, excluding the
-regenerable `deps/`, `tts/`, and `home-assistant.log`).
-
-### orca tools
-
-```sh
-# Back up the /config volume to a directory
-orca home-assistant backup --config-path /opt/homeassistant/config --destination /mnt/backups
-
-# Restore from a specific tarball
-orca home-assistant restore \
-  --from /mnt/backups/homeassistant-config-20260625-010000.tar.gz \
-  --config-path /opt/homeassistant/config
-```
-
-### Shell scripts (`backup` / `restore`, installed at `/usr/local/bin`)
-
-```sh
-# Docker (inside the container)
-docker exec homeassistant backup
-docker exec homeassistant restore            # lists backups, restores latest
-
-# Host-side Docker — stops container, backs up /config volume, restarts
-backup --container homeassistant --output /opt/homeassistant/backups
-restore /opt/homeassistant/backups/homeassistant-config-20260625-010000.tar.gz --container homeassistant
-```
-
----
-
-## Registering with orca
-
-After deploy, register the instance so the `home-assistant.*` tools can reach
-it (create an HA long-lived access token first):
-
-```sh
-orca tool home-assistant.create \
-  --name home --base-url http://127.0.0.1:8123 --token <ha-token> --enabled true
-
-orca tool home-assistant.entities --endpoint home --domain light
-```
-
-`scripts/configure.sh` wraps this for shell-bootstrap use.
+- `src/` — the plugin (pure Rust): the `ServiceBackend` descriptor + `configure` / `status`.
+- `compose.yml` — standalone deployment.
+- `scripts/` — provisioning / lifecycle helpers.
+- `assets/` — plugin icon.
