@@ -2,6 +2,10 @@
 name = "homeassistant"
 version = "0.1.0"
 edition = "2021"
+description = "Home Assistant — orca plugin + deploy assets: lifecycle + entities/automations/service API"
+
+[package.metadata.orca]
+category = "home"
 
 [lib]
 name = "homeassistant"
