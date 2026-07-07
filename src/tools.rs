@@ -31,8 +31,7 @@ pub struct HaEndpoint {
 // ── HTTP client helper ─────────────────────────────────────────────────────
 
 fn make_client(name: &str) -> Result<Client> {
-    let conn = runtime::open_db()?;
-    let row = endpoint_db::get(&conn, name)?
+    let row = endpoint_db::get(name)?
         .with_context(|| format!("home assistant endpoint '{name}' not registered"))?;
     if !row.enabled {
         bail!("home assistant endpoint '{name}' is disabled");
