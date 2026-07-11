@@ -9,7 +9,7 @@ pub mod tools;
 
 use plugin_toolkit::http::{Client as HttpClient, HttpError};
 use plugin_toolkit::serde_json::{Map, Value};
-use plugin_toolkit::urlencoding;
+use plugin_toolkit::url;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -111,7 +111,7 @@ impl Client {
         if entity_id.is_empty() {
             return Err(HaError::MissingEntityId);
         }
-        let path = format!("/api/states/{}", urlencoding::encode(entity_id));
+        let path = format!("/api/states/{}", url::encode(entity_id));
         let resp = self
             .http
             .get(self.url(&path))
@@ -139,8 +139,8 @@ impl Client {
         }
         let path = format!(
             "/api/services/{}/{}",
-            urlencoding::encode(&call.domain),
-            urlencoding::encode(&call.service),
+            url::encode(&call.domain),
+            url::encode(&call.service),
         );
         let resp = self
             .http
