@@ -1133,7 +1133,6 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 name = "homeassistant"
 version = "0.1.0"
 dependencies = [
- "abi_stable",
  "plugin-toolkit",
  "tempfile",
  "tokio",
@@ -1976,7 +1975,6 @@ dependencies = [
  "derive",
  "dispatch",
  "futures-core",
- "futures-executor",
  "futures-util",
  "graphql",
  "graphql_client",
