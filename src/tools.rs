@@ -7,6 +7,9 @@
 //!   - `home-assistant.automations`
 //!   - `home-assistant.service`    invoke an HA service
 //!
+//! The endpoint tools use `#[endpoint_tool]`: the client-resolve + args-struct
+//! + `#[orca_tool]` scaffolding is generated, so each tool is just its call.
+//!
 //! Imports flow through `plugin_toolkit::prelude::*` only.
 #![allow(clippy::disallowed_types)]
 
@@ -43,74 +46,39 @@ fn make_client(name: &str) -> Result<Client> {
 // home-assistant.entities — list entities (optionally domain-filtered)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(
-    plugin_toolkit::clap::Args,
-    plugin_toolkit::serde::Serialize,
-    plugin_toolkit::serde::Deserialize,
-    plugin_toolkit::schemars::JsonSchema,
-)]
-#[serde(crate = "plugin_toolkit::serde")]
-#[schemars(crate = "plugin_toolkit::schemars")]
-pub struct HaEntitiesArgs {
-    #[arg(long)]
-    pub endpoint: String,
+#[endpoint_tool(domain = "home-assistant", verb = "entities")]
+/// List entities, optionally filtered to one HA domain.
+async fn ha_entities(
+    client: Client,
     /// Optional HA domain filter (light, sensor, switch, …).
     #[arg(long)]
-    pub domain: Option<String>,
-}
-
-#[orca_tool(domain = "home-assistant", verb = "entities")]
-async fn ha_entities(args: HaEntitiesArgs, _ctx: &ToolCtx) -> Result<JsonAny> {
-    let client = make_client(&args.endpoint)?;
-    Ok(client.entity_list(args.domain.as_deref()).await?.into())
+    domain: Option<String>,
+) -> Result<JsonAny> {
+    Ok(client.entity_list(domain.as_deref()).await?.into())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // home-assistant.entity — single entity state
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(
-    plugin_toolkit::clap::Args,
-    plugin_toolkit::serde::Serialize,
-    plugin_toolkit::serde::Deserialize,
-    plugin_toolkit::schemars::JsonSchema,
-)]
-#[serde(crate = "plugin_toolkit::serde")]
-#[schemars(crate = "plugin_toolkit::schemars")]
-pub struct HaEntityArgs {
-    #[arg(long)]
-    pub endpoint: String,
+#[endpoint_tool(domain = "home-assistant", verb = "entity")]
+/// Fetch a single entity's current state.
+async fn ha_entity(
+    client: Client,
     /// Entity ID (e.g. "light.living_room").
     #[arg(long)]
-    pub entity_id: String,
-}
-
-#[orca_tool(domain = "home-assistant", verb = "entity")]
-async fn ha_entity(args: HaEntityArgs, _ctx: &ToolCtx) -> Result<JsonAny> {
-    let client = make_client(&args.endpoint)?;
-    Ok(client.entity_state(&args.entity_id).await?.into())
+    entity_id: String,
+) -> Result<JsonAny> {
+    Ok(client.entity_state(&entity_id).await?.into())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // home-assistant.automations — list automations
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(
-    plugin_toolkit::clap::Args,
-    plugin_toolkit::serde::Serialize,
-    plugin_toolkit::serde::Deserialize,
-    plugin_toolkit::schemars::JsonSchema,
-)]
-#[serde(crate = "plugin_toolkit::serde")]
-#[schemars(crate = "plugin_toolkit::schemars")]
-pub struct HaAutomationsArgs {
-    #[arg(long)]
-    pub endpoint: String,
-}
-
-#[orca_tool(domain = "home-assistant", verb = "automations")]
-async fn ha_automations(args: HaAutomationsArgs, _ctx: &ToolCtx) -> Result<JsonAny> {
-    let client = make_client(&args.endpoint)?;
+#[endpoint_tool(domain = "home-assistant", verb = "automations")]
+/// List configured automations.
+async fn ha_automations(client: Client) -> Result<JsonAny> {
     Ok(client.automation_list().await?.into())
 }
 
@@ -118,39 +86,26 @@ async fn ha_automations(args: HaAutomationsArgs, _ctx: &ToolCtx) -> Result<JsonA
 // home-assistant.service — invoke an HA service
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(
-    plugin_toolkit::clap::Args,
-    plugin_toolkit::serde::Serialize,
-    plugin_toolkit::serde::Deserialize,
-    plugin_toolkit::schemars::JsonSchema,
-)]
-#[serde(crate = "plugin_toolkit::serde")]
-#[schemars(crate = "plugin_toolkit::schemars")]
-pub struct HaServiceArgs {
-    #[arg(long)]
-    pub endpoint: String,
+/// [MUTATES STATE] Invoke a Home Assistant service.
+#[endpoint_tool(domain = "home-assistant", verb = "service", role = "admin")]
+async fn ha_service(
+    client: Client,
     /// HA service domain (light, switch, automation, …).
     #[arg(long)]
-    pub service_domain: String,
+    service_domain: String,
     /// HA service name (turn_on, toggle, …).
     #[arg(long)]
-    pub service_name: String,
-    #[arg(long)]
-    pub entity_id: Option<String>,
+    service_name: String,
+    #[arg(long)] entity_id: Option<String>,
     /// Opaque free-form service-data — upstream-defined.
     #[arg(skip)]
-    pub service_data: Option<sj::Map<String, sj::Value>>,
-}
-
-/// [MUTATES STATE] Invoke a Home Assistant service.
-#[orca_tool(domain = "home-assistant", verb = "service", role = "admin")]
-async fn ha_service(args: HaServiceArgs, _ctx: &ToolCtx) -> Result<JsonAny> {
-    let client = make_client(&args.endpoint)?;
+    service_data: Option<sj::Map<String, sj::Value>>,
+) -> Result<JsonAny> {
     let call = ServiceCall {
-        domain: args.service_domain,
-        service: args.service_name,
-        entity_id: args.entity_id,
-        data: args.service_data.unwrap_or_default(),
+        domain: service_domain,
+        service: service_name,
+        entity_id,
+        data: service_data.unwrap_or_default(),
     };
     Ok(client.service_call(&call).await?.into())
 }
