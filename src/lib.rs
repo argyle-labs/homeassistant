@@ -61,7 +61,7 @@ impl From<HttpError> for HaError {
     }
 }
 
-#[plugin_toolkit::derive::plugin_struct]
+#[plugin_toolkit::derive::orca_struct]
 #[derive(Debug, Clone)]
 pub struct ServiceCall {
     pub domain: String,
