@@ -1,7 +1,7 @@
 //! Dynamic (subprocess) entrypoint for the homeassistant plugin.
 //!
-//! Dynamic replacement for the retired cdylib export: orca's boot-time scan
-//! finds this executable in its install dir, spawns it, and speaks the UDS wire
+//! Orca's boot-time scan finds this executable in its install dir, spawns it,
+//! and speaks the UDS wire
 //! protocol to it. The plugin is a `[[bin]]`, owns no runtime, and reaches orca
 //! only through the socket.
 //!
