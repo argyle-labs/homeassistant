@@ -23,6 +23,9 @@ use plugin_toolkit::backend_def::{EMPTY_BACKENDS, EMPTY_SCHEMAS};
 use plugin_toolkit::serve::{serve, PluginSpec};
 
 fn main() -> plugin_toolkit::anyhow::Result<()> {
+    // Force the linker to retain the lib rlib and its `#[orca_tool]` inventory;
+    // without a reference from this bin the whole tool surface is dead-stripped.
+    homeassistant::link_anchor();
     serve(PluginSpec {
         name: "homeassistant".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
