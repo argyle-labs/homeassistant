@@ -1,73 +1,75 @@
-# Home Assistant OS
+# Home Assistant — operator notes
 
-Home automation hub. Runs as a VM on a Proxmox host.
+Operator notes for running the container image this repo ships. For the plugin
+tool surface and standalone quick-start, see the [README](../README.md).
 
-**Status:** running — VM on `<ip>:8123`
+## Deployment
 
----
+Home Assistant runs from [`compose.yml`](../compose.yml):
 
-## Instance
+- **Image:** `ghcr.io/home-assistant/home-assistant:stable`
+- **Networking:** `network_mode: host` — the web UI is served on port **8123**.
+- **State:** `/opt/homeassistant/config` on the host, mapped to `/config` in the
+  container. This directory (config YAML, `.storage/`, the SQLite recorder db) is
+  the entire durable state.
+- **Privileged:** enabled for USB / Bluetooth (Zigbee / Z-Wave) passthrough. Drop
+  `privileged` and the `/run/dbus` mount if you don't attach local radios.
 
-| Field | Value |
-|---|---|
-| VM ID | 105 |
-| Host | <host> (<ip>) |
-| IP | <ip> (static DHCP lease) |
-| OS | Home Assistant OS |
-| CPU | 2 cores |
-| RAM | 4 GB |
-| Disk | 32 GB (local-lvm, SSD) |
-| Machine | q35, OVMF BIOS |
-| onboot | yes |
-| Web UI | http://<ip>:8123 |
+Bring it up:
 
----
-
-## Integrations
-
-| Integration | LXC/VM | IP | Notes |
-|---|---|---|---|
-| Mosquitto MQTT | LXC | <ip> | Message broker — Z-Wave, Zigbee, other MQTT devices |
-| Zigbee2MQTT | LXC | <ip> | Zigbee coordinator, bridges to MQTT |
-| Z-Wave JS UI | LXC | <ip> | Z-Wave controller, bridges to MQTT |
-| AdGuard Home | LXC | <ip> | DNS — HA uses for local name resolution |
-| UniFi | LXC | <ip> | WiFi presence detection |
-
----
-
-## Service Management
-
-HAOS is managed entirely through the web UI. SSH access is available via the terminal add-on or developer tools.
-
-```bash
-# Direct SSH (if terminal add-on enabled)
-ssh root@<ip>
-
-# From Proxmox host (this is a VM, not LXC)
-qm terminal 105
+```sh
+docker compose up -d          # or: podman compose -f compose.yml up -d
+docker logs -f homeassistant  # watch first-run onboarding
 ```
 
----
+Then open `http://<host>:8123` and complete onboarding.
 
-## Backup
+Alternative runtimes: Proxmox LXC via [`lxc/provision.sh`](../lxc/provision.sh);
+Compose variants for Bluetooth / Zigbee live in [`examples/`](../examples/).
 
-HAOS has a built-in backup system: **Settings → System → Backups → Create Backup**
+## Updating
 
-Backups should be pushed to your NAS. Configure the Samba/NFS backup target:
-- Settings → System → Backups → change backup location to a network share
+Move to the head of a release channel by re-pulling the image tag and recreating
+the container:
 
-> **TODO:** Configure automatic backup to a network share (e.g. `/mnt/user/backups/homeassistant/`).
+```sh
+docker compose pull && docker compose up -d
+```
 
----
+Home Assistant publishes `stable`, `beta`, and `dev` tags on
+`ghcr.io/home-assistant/home-assistant`. With orca, `home-assistant.update`
+(`--channel stable|beta|dev`) does this for Docker or LXC.
 
-## Planned: Move to IoT VLAN
+## Backup & restore
 
-Home Assistant and Z-Wave JS UI can be moved to an IoT VLAN with firewall rules allowing LAN access on ports 8123 and 8091. See your OPNsense setup (IoT VLAN section).
+The `/config` volume is the whole service state. For a clean copy, stop the
+container first:
 
----
+```sh
+docker compose stop
+tar -czf ha-config-$(date +%Y%m%d).tar.gz \
+  --exclude=./deps --exclude=./tts --exclude=./home-assistant.log \
+  -C /opt/homeassistant/config .
+docker compose start
+```
 
-## Related
+`deps/`, `tts/`, and `home-assistant.log` are regenerable and excluded. Restore
+by extracting the archive back over `/config` (with the container stopped) and
+starting it again. With orca, `home-assistant.backup` / `home-assistant.restore`
+perform exactly this, and Home Assistant's own **Settings → System → Backups**
+UI is available for in-app snapshots.
 
-- MQTT broker
-- Zigbee2MQTT integration
-- Z-Wave JS UI integration
+## Configuring an orca endpoint
+
+To drive a running instance through orca's `home-assistant.*` tools, register it
+with a long-lived access token (HA profile → Security → Long-lived access
+tokens):
+
+```sh
+orca home-assistant.create --name home --base-url http://<host>:8123 --token <token>
+orca home-assistant.entities --domain light
+orca home-assistant.service --service-domain light --service-name turn_on --entity-id light.example
+```
+
+The token is stored as a secret. See the [README](../README.md) for the full
+tool list.

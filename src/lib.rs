@@ -6,6 +6,12 @@
 pub mod lifecycle;
 pub mod tools;
 
+/// Zero-cost link anchor. The `[[bin]]` entrypoint calls this from `main` so the
+/// linker retains this rlib and, with it, every `#[orca_tool]` inventory item in
+/// [`tools`] and [`lifecycle`]. Without a reference from the bin, the whole rlib
+/// (and its tool surface) is dropped at link time. See `src/main.rs`.
+pub fn link_anchor() {}
+
 use plugin_toolkit::http::{Client as HttpClient, HttpError};
 use plugin_toolkit::serde_json::{Map, Value};
 use plugin_toolkit::url;
