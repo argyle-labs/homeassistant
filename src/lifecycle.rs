@@ -243,11 +243,14 @@ pub struct HaUpdateOutput {
     pub log: String,
 }
 
-/// **Update a Home Assistant deployment** to the head of a release channel. On
+/// **Upgrade a Home Assistant deployment** to the head of a release channel. On
 /// `docker`, re-pulls the channel image tag and recreates the container. On
 /// `lxc`, pulls the new container image inside the CT and restarts the service.
-#[orca_tool(domain = "home-assistant", verb = "update")]
-async fn ha_update(args: HaUpdateArgs, _ctx: &ToolCtx) -> Result<HaUpdateOutput> {
+///
+/// Distinct from `home-assistant.update`, which edits endpoint registry metadata
+/// (base_url/token/enabled) and never touches the deployment.
+#[orca_tool(domain = "home-assistant", verb = "upgrade")]
+async fn ha_upgrade(args: HaUpdateArgs, _ctx: &ToolCtx) -> Result<HaUpdateOutput> {
     let tag = args.channel.image_tag();
     let image = format!("ghcr.io/home-assistant/home-assistant:{tag}");
     let output = match args.runtime {

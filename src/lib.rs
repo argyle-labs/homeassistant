@@ -97,18 +97,36 @@ impl Client {
     }
 
     /// List all entities, optionally filtered by domain (light, sensor, …).
+    ///
+    /// HA's `GET /api/states` has no server-side domain filter — it ignores an
+    /// unknown query param and returns every entity — so the filter is applied
+    /// client-side by the `<domain>.` entity_id prefix.
     pub async fn entity_list(&self, domain: Option<&str>) -> Result<Value, HaError> {
-        let mut req = self
+        let resp = self
             .http
             .get(self.url("/api/states"))
-            .bearer(&self.cfg.token);
-        if let Some(d) = domain.filter(|d| !d.is_empty()) {
-            req = req.query("domain", d);
-        }
-        let resp = req.send().await?;
-        Ok(resp
+            .bearer(&self.cfg.token)
+            .send()
+            .await?;
+        let body = resp
             .json::<Value>()
-            .unwrap_or_else(|_| Value::String(resp.text())))
+            .unwrap_or_else(|_| Value::String(resp.text()));
+        if let Some(d) = domain.filter(|d| !d.is_empty()) {
+            if let Value::Array(items) = &body {
+                let prefix = format!("{d}.");
+                let filtered: Vec<Value> = items
+                    .iter()
+                    .filter(|e| {
+                        e.get("entity_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with(&prefix))
+                    })
+                    .cloned()
+                    .collect();
+                return Ok(Value::Array(filtered));
+            }
+        }
+        Ok(body)
     }
 
     /// Fetch the current state of one entity.
@@ -168,7 +186,7 @@ impl Client {
 mod tests {
     use super::*;
     use plugin_toolkit::serde_json::json;
-    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn cfg(uri: String) -> Config {
@@ -195,17 +213,33 @@ mod tests {
 
     #[tokio::test]
     async fn entity_list_with_domain_filter() {
+        // HA returns ALL entities regardless of any query param; the domain
+        // filter must be applied client-side by entity_id prefix.
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/states"))
-            .and(query_param("domain", "light"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"entity_id": "light.lr"},
+                {"entity_id": "switch.fan"},
+                {"entity_id": "light.kitchen"}
+            ])))
             .mount(&server)
             .await;
-        Client::new(cfg(server.uri()))
+        let v = Client::new(cfg(server.uri()))
             .entity_list(Some("light"))
             .await
             .unwrap();
+        let ids = v.as_array().expect("array");
+        assert_eq!(
+            ids.len(),
+            2,
+            "only light.* entities should survive the filter"
+        );
+        assert!(
+            ids.iter()
+                .all(|e| e["entity_id"].as_str().unwrap().starts_with("light.")),
+            "every returned entity must be in the light domain"
+        );
     }
 
     #[tokio::test]
