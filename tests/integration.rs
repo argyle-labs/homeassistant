@@ -7,7 +7,7 @@
 
 use homeassistant::{Client, Config, ServiceCall};
 use plugin_toolkit::serde_json::{json, Map};
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -43,18 +43,34 @@ async fn auth_header_uses_bearer_token_format() {
 }
 
 #[tokio::test]
-async fn domain_filter_is_passed_as_query_param() {
+async fn domain_filter_is_applied_client_side() {
+    // HA's GET /api/states has no server-side domain filter and returns every
+    // entity; the client must filter by the `<domain>.` entity_id prefix.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/states"))
-        .and(query_param("domain", "switch"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"entity_id": "switch.fan"},
+            {"entity_id": "light.lr"},
+            {"entity_id": "switch.plug"}
+        ])))
         .mount(&server)
         .await;
-    Client::new(Config::new(server.uri(), "t"))
+    let v = Client::new(Config::new(server.uri(), "t"))
         .entity_list(Some("switch"))
         .await
-        .expect("domain filter must be a query param");
+        .expect("entity_list must succeed");
+    let ids = v.as_array().expect("array response");
+    assert_eq!(
+        ids.len(),
+        2,
+        "only switch.* entities should survive the filter"
+    );
+    assert!(
+        ids.iter()
+            .all(|e| e["entity_id"].as_str().unwrap().starts_with("switch.")),
+        "every returned entity must be in the switch domain"
+    );
 }
 
 #[tokio::test]
