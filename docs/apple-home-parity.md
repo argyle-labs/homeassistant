@@ -4,11 +4,11 @@ Working notes for achieving full parity and control between **HA Voice (Assist)*
 **Apple Home (HomeKit / Siri)** for the house. Captured live from the running instance;
 update as the configuration converges.
 
-- **Instance:** HAOS `2026.8.3` at `http://10.10.10.13:8123` (network_mode host, `/config` on host)
+- **Instance:** HAOS `2026.8.3` at `http://10.0.0.13:8123` (network_mode host, `/config` on host)
 - **Token:** 1Password item `Home Assistant (orca)` (long-lived, admin)
-- **Host access:** `ssh root@10.10.10.13` (key-based) → `/config/.storage/*` is ground truth.
+- **Host access:** `ssh root@10.0.0.13` (key-based) → `/config/.storage/*` is ground truth.
   No `python3` on the HAOS host; pull `.storage/*.json` locally to parse.
-- **WS API:** `ws://10.10.10.13:8123/api/websocket` (auth → `config/*_registry/list`, `config_entries/get`).
+- **WS API:** `ws://10.0.0.13:8123/api/websocket` (auth → `config/*_registry/list`, `config_entries/get`).
   `config_entries/get` **strips `options`** — bridge include/exclude filters must be read from
   `.storage/core.config_entries`, not the WS list.
 
@@ -57,7 +57,7 @@ update as the configuration converges.
 3. **Media double-exposure:** exclude the 5 accessory-mode media_players from both bridges' domains.
 4. **Set preferred Assist pipeline** and assign to both satellites; recover "Office Assistant" (offline).
 5. **Repair:** remove dead `http:` block from `configuration.yaml` (lines 12-16). Settings already
-   migrated to `.storage/http` (`yaml_migration_done: true`, trusted_proxies `10.10.10.6/32` preserved) —
+   migrated to `.storage/http` (`yaml_migration_done: true`, trusted_proxies `10.0.0.6/32` preserved) —
    safe to delete. Deadline: before HA 2027.2.0.
 6. **Decide Google Assistant** (107 exposed): retire if going all-in on Apple, or keep for parity.
 7. **Later:** HA dashboards + HomeKit/Apple Home room+dashboard organization.
@@ -165,12 +165,12 @@ avoid accidental "turn off servers" (keep in HomeKit).
   I briefly set it to Cloud then **reverted to Whisper** to respect the choice.
 - ⚠️ **"Office Assistant" satellite offline** — physical (powered off/unplugged); power on at the device.
 - 🔴 **`ollama` container NEVER started** (`docker inspect ollama` → status=created, StartedAt=0001) on
-  willow (10.10.10.10). The **Whisper pipeline's conversation agent is ollama** → local voice
+  willow (10.0.0.10). The **Whisper pipeline's conversation agent is ollama** → local voice
   understanding is currently non-functional. Either start ollama (`docker start ollama`, needs a model)
   or the local pipeline won't reason. (whisper-ai STT container IS up.)
 - 🔴 **Music Assistant is not deployed at all** — no `music-assistant` stack exists in meerkat's compose
   set (`/mnt/user/appdata/meerkat/compose/` has 28 stacks incl. navidrome, plex, jellyfin, arr suite,
-  but no MA). HA's MA integration points at dead `10.10.10.10:8095`. Media stacks don't run on willow
+  but no MA). HA's MA integration points at dead `10.0.0.10:8095`. Media stacks don't run on willow
   (only dockge/ollama/syncthing/whisper-ai there); they deploy to a host that mounts `/mnt/willow/data/media`.
   **Plan (user-confirmed): author a `music-assistant` stack in meerkat, wire to Navidrome + Spotify, and
   reconnect HA's integration to the new address.** Local meerkat repo: `/Users/scottkey/code/meerkat`;
@@ -183,12 +183,12 @@ avoid accidental "turn off servers" (keep in HomeKit).
 - ✅ **Rewired the Whisper pipeline** `conversation_engine` → **`conversation.home_assistant`** (built-in
   local intent agent; controls all 38 exposed entities). Local voice now works fully local:
   `stt.faster_whisper` (whisper-ai container up) → HA intent → cloud TTS. Preferred pipeline = Whisper.
-- ➕ Added a base Ollama integration in HA (`http://10.10.10.10:11434`) for optionally adding an LLM
+- ➕ Added a base Ollama integration in HA (`http://10.0.0.10:11434`) for optionally adding an LLM
   conversation agent later via UI (Settings→Devices→Ollama→Add conversation agent). Subentry flow is
   **UI-only** in 2026.8 (no working WS/REST path found — 4 endpoints tried).
 
 ## Music Assistant — DEPLOYED, onboarding pending (2026-08-23)
-- ✅ **Deployed MA v2.9.13 on baldur (10.10.10.6:8095)** — new Dockge stack
+- ✅ **Deployed MA v2.9.13 on baldur (10.0.0.6:8095)** — new Dockge stack
   `/opt/stacks/music-assistant/docker-compose.yml` (image `ghcr.io/music-assistant/server`,
   `network_mode: host` for cast/DLNA/mDNS discovery, appdata `/opt/appdata/music-assistant`,
   music lib `${MEDIA_PATH}/music:/media/music:ro`). Container Up, `/info` returns 302/running.
@@ -196,8 +196,8 @@ avoid accidental "turn off servers" (keep in HomeKit).
   (A stale OAuth callback link 500s harmlessly — the flow already completed; single clean entry.)
 - ✅ **All 3 providers configured + VALIDATED** (via MA WS `auth/login`→`auth` JWT handshake; note
   `POST /auth/login` 500s, use the `/ws` command path):
-  - **Subsonic→Navidrome** (`opensubsonic--uW9zndpL`, `10.10.10.6:4533`, user skey) — available.
-  - **Audiobookshelf** (`audiobookshelf--2oT8exrQ`, `10.10.10.6:13378`, user skey) — available.
+  - **Subsonic→Navidrome** (`opensubsonic--uW9zndpL`, `10.0.0.6:4533`, user skey) — available.
+  - **Audiobookshelf** (`audiobookshelf--2oT8exrQ`, `10.0.0.6:13378`, user skey) — available.
   - **Spotify** (`spotify--t4u6aRSo`, OAuth) — available/streaming.
 - ✅ **Libraries synced:** 319 artists / 174 albums / **541 tracks** / 63 playlists (Navidrome),
   **223 audiobooks** (Audiobookshelf). 10 players discovered; 8 flowing into HA as media_players.
@@ -209,14 +209,14 @@ avoid accidental "turn off servers" (keep in HomeKit).
   `home_assistant_voice_09e467_media_player` (MA "Jarvis Speaker" is canonical). TVs kept for video.
 - 🔲 **Source-of-truth (meerkat repo)**: still to add — `compose/music-assistant/`, `.envrc` vars
   (`MUSIC_ASSISTANT_IMAGE_TAG/PORT/CONFIG_PATH`), Caddyfile route
-  `music-assistant.scottkey.me → 10.10.10.6:8095`, `scripts/meerkat.d/registry.sh` entry,
+  `music-assistant.scottkey.me → 10.0.0.6:8095`, `scripts/meerkat.d/registry.sh` entry,
   `docs/services/music-assistant.md`. (Repo's `compose/` files are currently empty in-tree; deployed
   copies live on the hosts.)
 ## Spotify → Navidrome library-building (#3, in progress 2026-08-23)
 Architecture: **Lidarr Spotify Import List** → pulls artists/albums from Spotify → downloads via
 Prowlarr indexers + qBittorrent/SABnzbd → imports to `/data/media/music` (= willow's music, served
 by Navidrome). This is the canonical "capture Spotify → build Navidrome library" path.
-- ✅ **Lidarr deployed** on freyr (10.10.10.15:8686) — the staged stack `/opt/stacks/lidarr` was down;
+- ✅ **Lidarr deployed** on freyr (10.0.0.15:8686) — the staged stack `/opt/stacks/lidarr` was down;
   brought up (`docker compose up -d`, ping 200). Mounts `/mnt/data/media`(CIFS from willow)→`/data/media`,
   `/mnt/downloads`. Shares the `media` docker network with sonarr/radarr/prowlarr.
 - ✅ **Lidarr wired + verified** (2026-08-23): root folder `/data/media/music` (id 1, ~20TB free);
@@ -243,14 +243,14 @@ Many near-duplicate entities represent the SAME physical device via different in
   name per physical device; hide the redundant integration duplicates.
 
 ## Music Assistant workstream (added 2026-08-23)
-- ⚠️ **MA integration is DOWN**: config entry URL `http://10.10.10.10:8095` points at the Unraid box
+- ⚠️ **MA integration is DOWN**: config entry URL `http://10.0.0.10:8095` points at the Unraid box
   (only 80/443 open); 0 MA-tagged players live. MA moved (likely `music.scottkey.me` behind 443)
   or container stopped. Fix address before source validation / Spotify→Navidrome work.
-- MA server: `http://10.10.10.10:8095`, token in `music_assistant` config entry.
+- MA server: `http://10.0.0.10:8095`, token in `music_assistant` config entry.
 - Goals: (a) validate all sources reachable (Navidrome + Spotify + others);
   (b) expose MA playback so HA Voice speakers AND Google Home speakers can be told to play
   (treat Google like Apple); (c) capture Spotify library/playlists → generate download lists →
   build a Navidrome library. See also `music-assistant.md`.
 - Speaker fleet (media_players): Apple TVs (bedroom/living room), Google Homes (kitchen mini,
-  bedroom, chromecast audio "Stereo"), Sony songpal soundbars/speakers (10.10.10.3/5/26/174/180),
+  bedroom, chromecast audio "Stereo"), Sony songpal soundbars/speakers (10.0.0.3/5/26/174/180),
   DLNA renderers, HA Voice PE satellites (Jarvis online / Office Assistant offline), LG webOS + Samsung TVs.

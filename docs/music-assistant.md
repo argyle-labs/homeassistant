@@ -3,7 +3,7 @@
 > **Status: MAP ONLY.** The unifying orca domain and Music Assistant (MA) are
 > **not yet built/deployed**. This documents the target so it can be built
 > incrementally and turned into plugin code. Home Assistant is live at
-> `10.10.10.13:8123` (see [home-assistant.md](home-assistant.md); creds in
+> `10.0.0.13:8123` (see [home-assistant.md](home-assistant.md); creds in
 > 1Password `Home Assistant (orca)`). Audio engine = Music Assistant; video =
 > the existing Plex (mimir/njord) + Jellyfin servers; HA exposes the players;
 > **orca is the single pane over all of it.**
@@ -98,7 +98,7 @@ add-on or a standalone container and exposes a first-class HA integration.
 
 | Provider | Source | Notes |
 |----------|--------|-------|
-| **Navidrome (Subsonic)** | `http://10.10.10.6:4533` | our self-hosted library; creds in `navidrome (orca)`. Primary. |
+| **Navidrome (Subsonic)** | `http://10.0.0.6:4533` | our self-hosted library; creds in `navidrome (orca)`. Primary. |
 | **Plex** | mimir/njord | optional, if we want Plex music too |
 | **Spotify / others** | cloud | optional streaming providers |
 | Local filesystem | willow `/data/media/music` | fallback / direct |
