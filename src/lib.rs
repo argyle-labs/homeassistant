@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub(crate) mod authz;
+pub mod config_entries;
 pub mod homekit;
 pub mod lifecycle;
 pub mod mounts;

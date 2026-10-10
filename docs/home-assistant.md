@@ -149,3 +149,10 @@ no longer exist. With WebSocket access it also lists Assist-exposed entities
 that no bridge includes, skipping `media_player` by default
 (`--skip-domain`), since Apple handles TVs and HomePods natively. Without it,
 that parity check is skipped with a note.
+
+## Config-entry drift
+
+`home-assistant.config-entry-drift` (read-only, REST) groups config entries
+that share a domain and title, such as a device re-added after a DHCP move. It
+also lists enabled entries in a failed or not-loaded state, with HA's reason.
+Disabled entries are not failures.
