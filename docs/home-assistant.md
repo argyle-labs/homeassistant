@@ -156,3 +156,14 @@ The audit reports:
 - voice-visible entities with **no area**.
 
 Hidden and disabled entities are ignored.
+
+## Bare-noun aliases
+
+`home-assistant.naming-aliases` proposes the bare noun HA needs to reach an
+entity by "the <area> <noun>": the name with its area removed from the front
+or back ("Living Room Overhead" → `overhead`). It skips nouns that are
+plural, under 4 characters, already present, or that would collide with
+another entity in the same area, and reports why. It requires the `admin`
+role (dry runs too) and is dry-run unless `--execute`. Each write re-reads the
+entity first and keeps every alias it has at that moment, then is verified by
+re-reading. If any write fails, the call fails and lists what was applied.
