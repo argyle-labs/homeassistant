@@ -139,3 +139,13 @@ unavailable".
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means
 none; a dropped connection can lose a write while returning a falsy result.
+
+## Assist pipeline validation
+
+`home-assistant.assist-pipelines` (read-only) lists every Assist pipeline and
+flags an `stt_engine`, `tts_engine`, `conversation_engine`, or
+`wake_word_entity` that names an entity which does not exist (`missing`).
+`preferredBroken` is true when the preferred pipeline is missing or has a
+missing reference, meaning every voice command fails. Provider ids that are
+not entities (`cloud`) are reported as `unverified`. Built-in agents and
+empty STT/TTS (text-only pipelines) are not problems.
