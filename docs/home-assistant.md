@@ -139,3 +139,20 @@ unavailable".
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means
 none; a dropped connection can lose a write while returning a falsy result.
+
+## Naming audit
+
+`home-assistant.naming-audit` (read-only) applies HA's voice rules to the
+registry. HA reads "the <area> <noun>" as area plus name, so a phrase only
+has to be unique within one area; the same bare noun in two areas is correct.
+The audit reports:
+
+- **collisions**: one phrase (name or alias, case-insensitive, leading "the"
+  ignored) answered by two entities in the same area, such as a Music
+  Assistant shadow player holding `bedroom tv`. Entities without an area
+  share one scope.
+- **plural** aliases (`lights`), which hijack area-wide commands.
+- **short** aliases (under 4 characters), which HA shows as display names.
+- voice-visible entities with **no area**.
+
+Hidden and disabled entities are ignored.
