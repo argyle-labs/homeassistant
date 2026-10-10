@@ -139,3 +139,13 @@ unavailable".
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means
 none; a dropped connection can lose a write while returning a falsy result.
+
+## HomeKit bridge audit
+
+`home-assistant.bridge-audit` (read-only) lists every HomeKit config entry
+with its state and include filter, read from the entry's diagnostics over
+REST. It flags entries that are not `loaded` and filters naming entities that
+no longer exist. With WebSocket access it also lists Assist-exposed entities
+that no bridge includes, skipping `media_player` by default
+(`--skip-domain`), since Apple handles TVs and HomePods natively. Without it,
+that parity check is skipped with a note.

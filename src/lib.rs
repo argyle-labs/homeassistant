@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub(crate) mod authz;
+pub mod homekit;
 pub mod lifecycle;
 pub mod mounts;
 pub mod registry;
@@ -45,6 +46,7 @@ pub enum HaError {
     Http(HttpError),
     MissingEntityId,
     MissingService,
+    NotJson(String),
 }
 
 impl ::std::fmt::Display for HaError {
@@ -53,6 +55,7 @@ impl ::std::fmt::Display for HaError {
             HaError::Http(e) => ::std::fmt::Display::fmt(e, f),
             HaError::MissingEntityId => f.write_str("missing 'entity_id'"),
             HaError::MissingService => f.write_str("'domain' and 'service' are required"),
+            HaError::NotJson(p) => write!(f, "{p}: response is not JSON"),
         }
     }
 }
@@ -180,6 +183,19 @@ impl Client {
         Ok(resp
             .json::<Value>()
             .unwrap_or_else(|_| Value::String(resp.text())))
+    }
+
+    /// GET an API path (`/api/...`) and parse JSON. A non-2xx status
+    /// (401, 404, …) or a body that is not JSON is an error, never a value.
+    pub async fn get_json(&self, path: &str) -> Result<Value, HaError> {
+        let resp = self
+            .http
+            .get(self.url(path))
+            .bearer(&self.cfg.token)
+            .send()
+            .await?;
+        resp.json::<Value>()
+            .map_err(|_| HaError::NotJson(path.to_string()))
     }
 
     fn url(&self, path: &str) -> String {
