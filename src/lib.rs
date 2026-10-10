@@ -7,6 +7,7 @@ pub(crate) mod authz;
 pub mod lifecycle;
 pub mod mounts;
 pub mod registry;
+pub mod sv_mounts;
 pub mod tools;
 pub mod voice;
 pub(crate) mod ws;

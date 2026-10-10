@@ -139,3 +139,25 @@ unavailable".
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means
 none; a dropped connection can lose a write while returning a falsy result.
+
+## Supervisor mounts
+
+`home-assistant.mount-*` manages the Supervisor's SMB/NFS mounts through the
+WebSocket `supervisor/api` passthrough. A long-lived token gets 401 on the
+REST `/api/hassio/*` proxy. The plugin controls the Supervisor; it never
+mounts anything itself.
+
+| Tool | Mutates | Purpose |
+|---|---|---|
+| `mount-list`, `mount-detail` | no | Mounts with state, plus `default_backup_mount`. |
+| `mount-health` | no | Probes each server's service ports (NFS 2049, SMB 445) and classifies `healthy`, `stale_session` (server up: run `mount-reload`), `server_down`, or `unknown`. Alerts on a missing default backup mount and on no active backup mount. |
+| `mount-create`, `mount-update` | yes | CIFS username/password come from orca secrets (`home-assistant.<name>.username` / `.password`, or `--username-secret` / `--password-secret`); the plan shows only `<secret:NAME>`. |
+| `mount-delete` | yes | Refuses the default backup mount without `--allow-default`. |
+| `mount-reload` | yes | Discards a stale session and mounts fresh. |
+| `mount-options` | yes | Sets `default_backup_mount` (must be an existing backup mount). |
+
+Every mutating verb requires the `admin` role (dry runs too), is dry-run unless
+`--execute`, and returns the re-read mount list after an executed call. A dry
+run of `mount-create`/`mount-update` fails if a referenced secret does not
+exist; `mount-update` fails if any requested field did not read back. A mount path that
+is a subdirectory of the server's export is legal and is not flagged.
