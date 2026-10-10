@@ -7,6 +7,7 @@ pub(crate) mod authz;
 pub mod lifecycle;
 pub mod mounts;
 pub mod tools;
+pub mod voice;
 
 /// Zero-cost link anchor. The `[[bin]]` entrypoint calls this from `main` so the
 /// linker retains this rlib and, with it, every `#[orca_tool]` inventory item in
