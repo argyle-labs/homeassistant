@@ -53,7 +53,7 @@ find_backup_dir() {
     if [[ -n "${BACKUP_DIR:-}" ]] && [[ -d "$BACKUP_DIR" ]]; then echo "$BACKUP_DIR"
     elif [[ -d /mnt/backups ]]; then echo "/mnt/backups"
     elif [[ -d /backups ]]; then echo "/backups"
-    else echo "$(pwd)"; fi
+    else pwd; fi
 }
 
 BACKUP_SEARCH_DIR=$(find_backup_dir)
@@ -73,6 +73,20 @@ if [[ -z "$BACKUP_FILE" ]]; then
 fi
 
 [[ -f "$BACKUP_FILE" ]] || { echo "[restore] Error: backup file not found: $BACKUP_FILE" >&2; exit 1; }
+[[ -f "${BACKUP_FILE}.sha256" ]] || { echo "[restore] Error: checksum sidecar missing: ${BACKUP_FILE}.sha256; refusing an unverified archive" >&2; exit 1; }
+# Verify and extract a private copy, so the file checked is the file extracted.
+# The sidecar catches corruption, not tampering: whoever can rewrite the
+# archive can rewrite the sidecar too.
+EXPECTED=$(awk 'NR==1{print tolower($1)}' "${BACKUP_FILE}.sha256")
+[[ "$EXPECTED" =~ ^[0-9a-f]{64}$ ]] || { echo "[restore] Error: malformed checksum sidecar" >&2; exit 1; }
+PRIVATE_DIR=$(mktemp -d)
+trap 'rm -rf "$PRIVATE_DIR"' EXIT
+chmod 700 "$PRIVATE_DIR"
+VERIFIED="${PRIVATE_DIR}/archive.tar.gz"
+cp "$BACKUP_FILE" "$VERIFIED"
+ACTUAL=$(sha256sum "$VERIFIED" | awk '{print $1}')
+[[ "$ACTUAL" == "$EXPECTED" ]] || { echo "[restore] Error: checksum mismatch for ${BACKUP_FILE##*/}" >&2; exit 1; }
+echo "[restore] Checksum verified."
 
 if [[ $FORCE -eq 0 ]]; then
     echo "[restore] Restoring ${BACKUP_FILE##*/} in 3 seconds — Ctrl-C to abort"
@@ -80,9 +94,9 @@ if [[ $FORCE -eq 0 ]]; then
 fi
 
 ha_stop
-trap ha_start EXIT
+trap 'ha_start; rm -rf "$PRIVATE_DIR"' EXIT
 
 echo "[restore] Extracting to ${DATA_DIR}..."
-tar -xzf "$BACKUP_FILE" -C "$DATA_DIR"
+tar -xzf "$VERIFIED" -C "$DATA_DIR"
 
 echo "[restore] Done. Restored to: ${DATA_DIR}"
