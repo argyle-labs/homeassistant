@@ -40,6 +40,23 @@ Home Assistant publishes `stable`, `beta`, and `dev` tags on
 `ghcr.io/home-assistant/home-assistant`. With orca, `home-assistant.update`
 (`--channel stable|beta|dev`) does this for Docker or LXC.
 
+## Extra mounts
+
+`home-assistant.install --mount HOST:CONTAINER[:ro|:rw]` (repeatable) binds
+host paths such as a media share or a backup target into the container.
+Host paths must sit under `/mnt/`, `/media/`, `/srv/` or `/data/`; paths may
+only use `A-Z a-z 0-9 . _ / -`. `/config`, `/etc/localtime`, and `/run/dbus` are
+reserved targets, and two mounts may not share a target. `install` is dry-run unless `--execute` is passed; the dry
+run validates the mounts and returns the planned steps. `install` and
+`upgrade` require the `admin` role, for dry runs too.
+
+- **Docker:** mounts are written to `compose.mounts.yml` beside `compose.yml`
+  and passed as a second `-f`. `home-assistant.upgrade` includes that override
+  whenever it exists, so upgrades keep the mounts.
+- **LXC:** `provision.sh --mount` adds `mp1`, `mp2`, … to the CT (`mp0` is
+  `/config`). Each host path appears at the same container path inside both the
+  CT and the HA container. Invalid mounts are rejected before `pct create`.
+
 ## Backup & restore
 
 The `/config` volume is the whole service state. For a clean copy, stop the

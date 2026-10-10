@@ -126,6 +126,15 @@ pub struct HaInstallArgs {
     #[arg(long)]
     #[serde(default)]
     pub bootstrap_path: Option<String>,
+    /// Extra bind mount `HOST:CONTAINER[:ro|:rw]`; repeatable. `/config`,
+    /// `/etc/localtime`, and `/run/dbus` are reserved.
+    #[arg(long = "mount")]
+    #[serde(default)]
+    pub mounts: Vec<String>,
+    /// Provision. Without it the call validates and returns the plan.
+    #[arg(long)]
+    #[serde(default)]
+    pub execute: bool,
 }
 
 fn default_config_path() -> String {
@@ -142,51 +151,117 @@ fn default_config_path() -> String {
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
 pub struct HaInstallOutput {
+    /// True when nothing was run (no `execute`).
+    pub dry_run: bool,
     /// True when the provisioning command completed successfully.
     pub provisioned: bool,
     /// The runtime the deployment targeted.
     pub runtime: Runtime,
+    /// Validated extra bind mounts.
+    pub mounts: Vec<crate::mounts::BindMount>,
+    /// Steps run (or that would run), in order.
+    pub plan: Vec<String>,
     /// Combined stdout from the provisioning step.
     pub log: String,
+}
+
+/// One install step: write a file, or run an argv.
+enum Step {
+    Write { path: String, contents: String },
+    Run(Vec<String>),
+}
+
+impl Step {
+    fn describe(&self) -> String {
+        match self {
+            Step::Write { path, .. } => format!("write {path}"),
+            Step::Run(argv) => argv.join(" "),
+        }
+    }
+}
+
+fn argv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| s.to_string()).collect()
+}
+
+fn install_plan(args: &HaInstallArgs) -> Result<(Vec<crate::mounts::BindMount>, Vec<Step>)> {
+    let mounts = crate::mounts::parse_all(&args.mounts)?;
+    let steps = match args.runtime {
+        Runtime::Docker => {
+            let compose = args.bootstrap_path.as_deref().unwrap_or("compose.yml");
+            let mut up = argv(&["docker", "compose", "-f", compose]);
+            let mut steps = Vec::new();
+            if !mounts.is_empty() {
+                let path = crate::mounts::override_path(compose);
+                up.extend(argv(&["-f", &path]));
+                steps.push(Step::Write {
+                    path,
+                    contents: crate::mounts::render_override(&mounts),
+                });
+            }
+            up.extend(argv(&["up", "-d"]));
+            steps.push(Step::Run(up));
+            steps
+        }
+        Runtime::Lxc => {
+            let vmid = args.vmid.context("`vmid` is required when runtime=lxc")?;
+            let script = args.bootstrap_path.as_deref().unwrap_or("lxc/provision.sh");
+            let mut cmd = argv(&[
+                "bash",
+                script,
+                &vmid.to_string(),
+                "--config",
+                &args.config_path,
+            ]);
+            for spec in &args.mounts {
+                cmd.extend(argv(&["--mount", spec]));
+            }
+            vec![Step::Run(cmd)]
+        }
+    };
+    Ok((mounts, steps))
 }
 
 /// **Provision a Home Assistant deployment.** On `docker`, brings up the
 /// Compose stack (host networking + persistent `/config`). On `lxc`, runs the
 /// Proxmox `provision.sh` bootstrap (create CT, install, start).
-#[orca_tool(domain = "home-assistant", verb = "install")]
-async fn ha_install(args: HaInstallArgs, _ctx: &ToolCtx) -> Result<HaInstallOutput> {
-    let output = match args.runtime {
-        Runtime::Docker => {
-            let compose = args
-                .bootstrap_path
-                .clone()
-                .unwrap_or_else(|| "compose.yml".to_string());
-            run(Command::new("docker")
-                .arg("compose")
-                .arg("-f")
-                .arg(&compose)
-                .arg("up")
-                .arg("-d"))
-            .await?
+#[orca_tool(domain = "home-assistant", verb = "install", role = "admin")]
+async fn ha_install(args: HaInstallArgs, ctx: &ToolCtx) -> Result<HaInstallOutput> {
+    crate::authz::require_admin(ctx)?;
+    install(&args).await
+}
+
+async fn install(args: &HaInstallArgs) -> Result<HaInstallOutput> {
+    let (mounts, steps) = install_plan(args)?;
+    let plan = steps.iter().map(Step::describe).collect();
+    if !args.execute {
+        return Ok(HaInstallOutput {
+            dry_run: true,
+            provisioned: false,
+            runtime: args.runtime,
+            mounts,
+            plan,
+            log: String::new(),
+        });
+    }
+    let mut log = String::new();
+    for step in &steps {
+        match step {
+            Step::Write { path, contents } => std::fs::write(path, contents)
+                .with_context(|| format!("failed to write '{path}'"))?,
+            Step::Run(cmd) => {
+                let out = run(Command::new(&cmd[0]).args(&cmd[1..])).await?;
+                log.push_str(&String::from_utf8_lossy(&out.stdout));
+            }
         }
-        Runtime::Lxc => {
-            let vmid = args.vmid.context("`vmid` is required when runtime=lxc")?;
-            let script = args
-                .bootstrap_path
-                .clone()
-                .unwrap_or_else(|| "lxc/provision.sh".to_string());
-            run(Command::new("bash")
-                .arg(&script)
-                .arg(vmid.to_string())
-                .arg("--config")
-                .arg(&args.config_path))
-            .await?
-        }
-    };
+    }
     Ok(HaInstallOutput {
+        dry_run: false,
         provisioned: true,
         runtime: args.runtime,
-        log: String::from_utf8_lossy(&output.stdout).into_owned(),
+        mounts,
+        plan,
+        log,
     })
 }
 
@@ -249,20 +324,24 @@ pub struct HaUpdateOutput {
 ///
 /// Distinct from `home-assistant.update`, which edits endpoint registry metadata
 /// (base_url/token/enabled) and never touches the deployment.
-#[orca_tool(domain = "home-assistant", verb = "upgrade")]
-async fn ha_upgrade(args: HaUpdateArgs, _ctx: &ToolCtx) -> Result<HaUpdateOutput> {
+#[orca_tool(domain = "home-assistant", verb = "upgrade", role = "admin")]
+async fn ha_upgrade(args: HaUpdateArgs, ctx: &ToolCtx) -> Result<HaUpdateOutput> {
+    crate::authz::require_admin(ctx)?;
     let tag = args.channel.image_tag();
     let image = format!("ghcr.io/home-assistant/home-assistant:{tag}");
     let output = match args.runtime {
         Runtime::Docker => {
             run(Command::new("docker").arg("pull").arg(&image)).await?;
-            run(Command::new("docker")
+            let mut up = Command::new("docker")
                 .arg("compose")
                 .arg("-f")
-                .arg(&args.compose_file)
-                .arg("up")
-                .arg("-d"))
-            .await?
+                .arg(&args.compose_file);
+            // Recreating without the override would silently drop the extra mounts.
+            let overlay = crate::mounts::override_path(&args.compose_file);
+            if Path::new(&overlay).is_file() {
+                up = up.arg("-f").arg(overlay);
+            }
+            run(up.arg("up").arg("-d")).await?
         }
         Runtime::Lxc => {
             let vmid = args.vmid.context("`vmid` is required when runtime=lxc")?;
@@ -273,7 +352,9 @@ async fn ha_upgrade(args: HaUpdateArgs, _ctx: &ToolCtx) -> Result<HaUpdateOutput
                 .arg("bash")
                 .arg("-c")
                 .arg(format!(
-                    "docker pull {image} && docker compose -f /opt/homeassistant/compose.yml up -d"
+                    "docker pull {image} && cd /opt/homeassistant && \
+                     docker compose -f compose.yml $([ -f {o} ] && echo -f {o}) up -d",
+                    o = crate::mounts::OVERRIDE_FILE
                 )))
             .await?
         }
@@ -438,6 +519,93 @@ mod tests {
         assert_eq!(Channel::Stable.image_tag(), "stable");
         assert_eq!(Channel::Beta.image_tag(), "beta");
         assert_eq!(Channel::Dev.image_tag(), "dev");
+    }
+
+    fn install_args(runtime: Runtime, mounts: &[&str], execute: bool) -> HaInstallArgs {
+        HaInstallArgs {
+            runtime,
+            vmid: Some(120),
+            config_path: default_config_path(),
+            bootstrap_path: None,
+            mounts: mounts.iter().map(|m| m.to_string()).collect(),
+            execute,
+        }
+    }
+
+    #[tokio::test]
+    async fn install_and_upgrade_refuse_non_admin_even_on_dry_run() {
+        use crate::authz::testing::{assert_refused, ctx};
+        for c in [ctx(None), ctx(Some("user"))] {
+            let err = ha_install(install_args(Runtime::Docker, &[], false), &c)
+                .await
+                .unwrap_err();
+            assert_refused(&err);
+            let args = HaUpdateArgs {
+                runtime: Runtime::Docker,
+                channel: Channel::Stable,
+                vmid: None,
+                compose_file: "compose.yml".into(),
+            };
+            assert_refused(&ha_upgrade(args, &c).await.unwrap_err());
+        }
+        let out = ha_install(
+            install_args(Runtime::Docker, &[], false),
+            &ctx(Some("admin")),
+        )
+        .await
+        .unwrap();
+        assert!(out.dry_run);
+    }
+
+    #[tokio::test]
+    async fn install_defaults_to_dry_run_plan() {
+        let out = install(&install_args(
+            Runtime::Docker,
+            &["/mnt/media:/media:ro"],
+            false,
+        ))
+        .await
+        .unwrap();
+        assert!(out.dry_run && !out.provisioned);
+        assert_eq!(
+            out.plan,
+            [
+                "write compose.mounts.yml",
+                "docker compose -f compose.yml -f compose.mounts.yml up -d"
+            ]
+        );
+        assert!(!Path::new("compose.mounts.yml").exists());
+    }
+
+    #[test]
+    fn docker_plan_without_mounts_uses_base_compose_only() {
+        let (m, steps) = install_plan(&install_args(Runtime::Docker, &[], false)).unwrap();
+        assert!(m.is_empty());
+        let plan: Vec<_> = steps.iter().map(Step::describe).collect();
+        assert_eq!(plan, ["docker compose -f compose.yml up -d"]);
+    }
+
+    #[test]
+    fn lxc_plan_forwards_mounts_to_provision() {
+        let (_, steps) = install_plan(&install_args(
+            Runtime::Lxc,
+            &["/mnt/media:/media:ro"],
+            false,
+        ))
+        .unwrap();
+        let plan: Vec<_> = steps.iter().map(Step::describe).collect();
+        assert_eq!(
+            plan,
+            ["bash lxc/provision.sh 120 --config /opt/homeassistant/config --mount /mnt/media:/media:ro"]
+        );
+    }
+
+    #[test]
+    fn install_rejects_invalid_mount_before_any_step() {
+        let err = install_plan(&install_args(Runtime::Docker, &["/mnt/x:/config"], true))
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("reserved"), "{err}");
     }
 
     #[tokio::test]

@@ -3,7 +3,9 @@
 // free-form by design — each integration defines its own attribute schema.
 #![allow(clippy::disallowed_types)]
 
+pub(crate) mod authz;
 pub mod lifecycle;
+pub mod mounts;
 pub mod tools;
 
 /// Zero-cost link anchor. The `[[bin]]` entrypoint calls this from `main` so the

@@ -19,6 +19,8 @@
 #   --config PATH      Host path for HA config (mounted at /opt/homeassistant/config)
 #   --channel CHANNEL  HA image channel: stable (default) | beta | dev
 #   --branch BRANCH    Repo branch to pull scripts from (default: main)
+#   --mount H:C[:ro]   Extra bind mount, repeatable: host path H appears at C in
+#                      both the CT and the HA container. /config is reserved.
 set -euo pipefail
 
 VMID="${1:?Usage: $0 <vmid> [options]}"
@@ -35,6 +37,7 @@ GW=""
 CONFIG_PATH="/opt/homeassistant/config"
 CHANNEL="stable"
 BRANCH="main"
+MOUNTS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,8 +52,39 @@ while [[ $# -gt 0 ]]; do
         --config)   CONFIG_PATH="$2"; shift 2 ;;
         --channel)  CHANNEL="$2";     shift 2 ;;
         --branch)   BRANCH="$2";      shift 2 ;;
+        --mount)    MOUNTS+=("$2");   shift 2 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
+done
+
+# Validated before `pct create` so a bad --mount never leaves a half-built CT.
+# Same rules as src/mounts.rs (keep in sync); mp0 is /config, so extras start at mp1.
+MP_LINES=()
+OVERRIDE=""
+SEEN=" "
+i=1
+for spec in "${MOUNTS[@]}"; do
+    IFS=: read -r host ct mode extra <<< "$spec"
+    # Strict charset: paths stay literal in mpN lines and the YAML override.
+    if [[ -n "$extra" || "$host" != /* || "$ct" != /* || "$ct" == "/" \
+          || ! "$host$ct" =~ ^[A-Za-z0-9._/-]+$ || "/$host/$ct/" =~ /\.\.?/ \
+          || ! "${mode:-rw}" =~ ^(ro|rw)$ ]]; then
+        echo "[provision] ERROR: invalid --mount '$spec' (want /HOST:/CONTAINER[:ro|:rw], chars A-Za-z0-9._/-)" >&2; exit 1
+    fi
+    case "${host%/}/" in
+        /mnt/?*|/media/?*|/srv/?*|/data/?*) ;;
+        *) echo "[provision] ERROR: --mount '$spec': host path must be under /mnt/, /media/, /srv/ or /data/" >&2; exit 1 ;;
+    esac
+    ct="${ct%/}"
+    case "$ct" in /config|/config/*|/etc/localtime|/etc/localtime/*|/run/dbus|/run/dbus/*)
+        echo "[provision] ERROR: --mount '$spec' targets reserved path '$ct'" >&2; exit 1 ;;
+    esac
+    [[ "$SEEN" == *" $ct "* ]] && { echo "[provision] ERROR: '$ct' is mounted more than once" >&2; exit 1; }
+    SEEN+="$ct "
+    ro=""; [[ "$mode" == "ro" ]] && ro=",ro=1"
+    MP_LINES+=("mp${i}: ${host%/},mp=${ct}${ro}")
+    OVERRIDE+="      - '${ct}:${ct}${mode:+:$mode}'"$'\n'
+    i=$((i + 1))
 done
 
 REPO_RAW="https://raw.githubusercontent.com/argyle-labs/homeassistant/${BRANCH}"
@@ -97,6 +131,10 @@ sudo mkdir -p "$CONFIG_PATH"
 echo "mp0: ${CONFIG_PATH},mp=/opt/homeassistant/config" \
     | sudo tee -a "/etc/pve/lxc/${VMID}.conf" > /dev/null
 
+for line in "${MP_LINES[@]}"; do
+    echo "$line" | sudo tee -a "/etc/pve/lxc/${VMID}.conf" > /dev/null
+done
+
 echo "[provision] Starting LXC ${VMID}..."
 sudo pct start "$VMID"
 
@@ -111,6 +149,14 @@ done
 echo "[provision] Fetching and running install.sh (channel: ${CHANNEL})..."
 sudo pct exec "$VMID" -- bash -c \
     "curl -fsSL '${REPO_RAW}/scripts/install.sh' | bash -s -- '${CHANNEL}'"
+
+if [[ -n "$OVERRIDE" ]]; then
+    echo "[provision] Applying ${#MOUNTS[@]} extra mount(s) to the HA container..."
+    printf '# Managed by home-assistant.install; extra bind mounts.\nservices:\n  homeassistant:\n    volumes:\n%s' "$OVERRIDE" \
+        | sudo pct exec "$VMID" -- tee /opt/homeassistant/compose.mounts.yml > /dev/null
+    sudo pct exec "$VMID" -- bash -c \
+        "cd /opt/homeassistant && docker compose -f compose.yml -f compose.mounts.yml up -d"
+fi
 
 LXC_IP=$(sudo pct exec "$VMID" -- hostname -I 2>/dev/null | awk '{print $1}')
 echo ""
