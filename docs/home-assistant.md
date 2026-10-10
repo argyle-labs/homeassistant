@@ -120,3 +120,22 @@ assistants handle badly. It is read-only and calls no service.
 
 Aliases and voice exposure live in the entity registry (WebSocket API), which
 this REST-based audit does not read; it flags names only.
+
+## WebSocket API and registry
+
+Registry, exposure, assist, backup, and Supervisor data are only on Home
+Assistant's WebSocket API (`/api/websocket`). The plugin's WebSocket client
+(`src/ws.rs`) handles the auth handshake and request/result matching. It
+needs a WebSocket transport from `plugin-toolkit`, which does not exist yet;
+until it lands, WebSocket-backed tools return "WebSocket transport
+unavailable".
+
+| Tool | Mutates | Purpose |
+|---|---|---|
+| `home-assistant.registry-entities` | no | Every entity with name, aliases, area, device, hidden/disabled, platform. |
+| `home-assistant.registry-areas` | no | Areas with aliases and floor. |
+| `home-assistant.registry-update` | yes | Set name, aliases, or area on one entity (an empty `--name` or `--area-id` clears it). Admin only (dry runs too). Dry-run unless `--execute`; each write is confirmed by re-reading the entity. |
+
+Registry traps the client handles: `entity_registry/list` omits aliases (the
+client reads `get_entries`, falling back to `get`); `aliases: [null]` means
+none; a dropped connection can lose a write while returning a falsy result.

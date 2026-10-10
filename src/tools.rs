@@ -34,13 +34,18 @@ pub struct HaEndpoint {
 
 // ── HTTP client helper ─────────────────────────────────────────────────────
 
-pub(crate) fn make_client(name: &str) -> Result<Client> {
+/// The enabled endpoint's base URL and token, for clients other than REST.
+pub(crate) fn endpoint_config(name: &str) -> Result<Config> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("home assistant endpoint '{name}' not registered"))?;
     if !row.enabled {
         bail!("home assistant endpoint '{name}' is disabled");
     }
-    Ok(Client::new(Config::new(row.base_url, row.token)))
+    Ok(Config::new(row.base_url, row.token))
+}
+
+pub(crate) fn make_client(name: &str) -> Result<Client> {
+    Ok(Client::new(endpoint_config(name)?))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
