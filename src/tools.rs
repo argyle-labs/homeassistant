@@ -6,6 +6,7 @@
 //!   - `home-assistant.entity`     single entity state
 //!   - `home-assistant.automations`
 //!   - `home-assistant.service`    invoke an HA service
+//!   - `home-assistant.voice-audit` (in [`crate::voice`]) read-only naming audit
 //!
 //! The endpoint tools use `#[endpoint_tool]`: the client-resolve + args-struct
 //! + `#[orca_tool]` scaffolding is generated, so each tool is just its call.
@@ -33,7 +34,7 @@ pub struct HaEndpoint {
 
 // ── HTTP client helper ─────────────────────────────────────────────────────
 
-fn make_client(name: &str) -> Result<Client> {
+pub(crate) fn make_client(name: &str) -> Result<Client> {
     let row = endpoint_db::get(name)?
         .with_context(|| format!("home assistant endpoint '{name}' not registered"))?;
     if !row.enabled {

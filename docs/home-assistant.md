@@ -73,3 +73,20 @@ orca home-assistant.service --service-domain light --service-name turn_on --enti
 
 The token is stored as a secret. See the [README](../README.md) for the full
 tool list.
+
+## Voice naming audit
+
+`home-assistant.voice-audit` reads `/api/states` and reports controllable
+entities (lights, switches, locks, media players, scenes, …) whose names voice
+assistants handle badly. It is read-only and calls no service.
+
+| Issue | Meaning |
+|---|---|
+| `missing_name` | No friendly name; voice falls back to the entity id. |
+| `ambiguous` | A bare device word such as "Speaker" or "Overhead". |
+| `duplicate` | Same name (case-insensitive) as another controllable entity. |
+| `leaked_slug` | Underscore or serial number in the name ("googlehome7284"). |
+| `power_critical` | A controllable entity whose name or entity id marks servers, network gear, or the media center; keep it out of `conversation` exposure. |
+
+Aliases and voice exposure live in the entity registry (WebSocket API), which
+this REST-based audit does not read; it flags names only.
