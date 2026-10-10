@@ -139,3 +139,22 @@ unavailable".
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means
 none; a dropped connection can lose a write while returning a falsy result.
+
+## Native backup review
+
+Home Assistant manages its own backups outside the PBS jobs.
+`home-assistant.backups` (read-only) surfaces them so they can be reviewed
+with the rest of the fleet:
+
+- every backup with id, name, date, age, size, type (`full`/`partial`), and
+  locations (`local`, a Supervisor mount, or a backup agent);
+- `status`: `ok`, `stale` (newest older than HA's `days_until_stale`,
+  default 3 days, or `--stale-days`), or `missing`;
+- the age of the newest backup with an **off-box** copy; a backup that only
+  exists inside the VM it protects is flagged;
+- alerts, including a failed last automatic backup on core installs.
+
+The Supervisor list is read through the WebSocket `supervisor/api`
+passthrough, which accepts a long-lived token where the REST
+`/api/hassio/*` proxy returns 401. Installs without a Supervisor fall back to
+core `backup/info`.
