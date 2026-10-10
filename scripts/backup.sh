@@ -49,5 +49,9 @@ tar -czf "$OUT_FILE" \
     --exclude=./home-assistant.log \
     -C "$DATA_DIR" .
 
+# Sidecar in `sha256sum -c` format; `restore` refuses an archive without a matching one.
+( cd "$OUTPUT_DIR" && sha256sum "${OUT_FILE##*/}" > "${OUT_FILE##*/}.sha256.tmp" \
+    && mv "${OUT_FILE##*/}.sha256.tmp" "${OUT_FILE##*/}.sha256" )
+
 SIZE=$(du -sh "$OUT_FILE" | cut -f1)
-echo "[backup] Done. ${SIZE} → ${OUT_FILE}"
+echo "[backup] Done. ${SIZE} → ${OUT_FILE} (+ .sha256)"

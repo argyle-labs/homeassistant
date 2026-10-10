@@ -64,17 +64,30 @@ container first:
 
 ```sh
 docker compose stop
-tar -czf ha-config-$(date +%Y%m%d).tar.gz \
+f=ha-config-$(date +%Y%m%d).tar.gz
+tar -czf "$f" \
   --exclude=./deps --exclude=./tts --exclude=./home-assistant.log \
   -C /opt/homeassistant/config .
+sha256sum "$f" > "$f.sha256"
 docker compose start
 ```
 
 `deps/`, `tts/`, and `home-assistant.log` are regenerable and excluded. Restore
 by extracting the archive back over `/config` (with the container stopped) and
-starting it again. With orca, `home-assistant.backup` / `home-assistant.restore`
-perform exactly this, and Home Assistant's own **Settings → System → Backups**
-UI is available for in-app snapshots.
+starting it again; run `sha256sum -c "$f.sha256"` first and do not restore an
+archive that fails it.
+
+With orca, `home-assistant.backup` / `home-assistant.restore` perform exactly
+this. Both are dry-run unless `--execute` is passed, and both require the
+`admin` role, for dry runs too. `backup` writes a
+`<archive>.sha256` sidecar and re-verifies it; `restore` verifies the archive
+against that sidecar (on dry runs too) and refuses a missing, malformed, or
+mismatched checksum. Restore copies the archive into a private 0700
+directory, verifies that copy, and extracts the copy, so the file checked is
+the file restored. The sidecar detects corruption and truncation; it does not
+authenticate, because anyone who can rewrite the archive can rewrite the
+sidecar beside it. Home Assistant's own **Settings → System → Backups** UI is
+also available for in-app snapshots.
 
 ## Configuring an orca endpoint
 
