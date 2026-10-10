@@ -46,8 +46,12 @@ else
     exit 1
 fi
 
-ha_stop() { [[ -n "$CONTAINER" ]] && docker stop "$CONTAINER" 2>/dev/null || true; }
-ha_start() { [[ -n "$CONTAINER" ]] && docker start "$CONTAINER" 2>/dev/null || true; }
+ha_stop() {
+    if [[ -n "$CONTAINER" ]]; then docker stop "$CONTAINER" 2>/dev/null || true; fi
+}
+ha_start() {
+    if [[ -n "$CONTAINER" ]]; then docker start "$CONTAINER" 2>/dev/null || true; fi
+}
 
 find_backup_dir() {
     if [[ -n "${BACKUP_DIR:-}" ]] && [[ -d "$BACKUP_DIR" ]]; then echo "$BACKUP_DIR"
