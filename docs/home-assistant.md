@@ -139,3 +139,18 @@ unavailable".
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means
 none; a dropped connection can lose a write while returning a falsy result.
+
+## Voice-assistant exposure
+
+`home-assistant.expose-audit` (read-only) compares exposure records with live
+entities. It reports ghosts (records still exposed to an assistant for
+entities that no longer exist), live controllable entities exposed nowhere,
+entities exposed to some assistants but not all, and per-assistant counts.
+
+An entity is live if it has a state or a registry entry, so an integration
+that is offline does not turn its entities into ghosts.
+
+`home-assistant.expose-purge` un-exposes every ghost from every assistant,
+and only while HA reports `RUNNING`.
+It requires the `admin` role (dry runs too) and is dry-run unless `--execute`; an executed purge re-lists and fails if
+any ghost is still exposed.

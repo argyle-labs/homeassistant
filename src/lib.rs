@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_types)]
 
 pub(crate) mod authz;
+pub mod expose;
 pub mod lifecycle;
 pub mod mounts;
 pub mod registry;
