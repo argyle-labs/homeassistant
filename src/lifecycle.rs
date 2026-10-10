@@ -289,6 +289,9 @@ async fn ha_upgrade(args: HaUpdateArgs, _ctx: &ToolCtx) -> Result<HaUpdateOutput
 // home-assistant.backup — tar the /config volume to a destination
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Suffix of the checksum sidecar written next to every archive.
+const CHECKSUM_SUFFIX: &str = ".sha256";
+
 #[derive(
     plugin_toolkit::clap::Args,
     plugin_toolkit::serde::Serialize,
@@ -305,6 +308,10 @@ pub struct HaBackupArgs {
     /// Directory to write the `.tar.gz` into. Created if missing.
     #[arg(long)]
     pub destination: String,
+    /// Write the archive. Without it the call only reports the planned archive.
+    #[arg(long)]
+    #[serde(default)]
+    pub execute: bool,
 }
 
 #[derive(
@@ -317,16 +324,23 @@ pub struct HaBackupArgs {
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
 pub struct HaBackupOutput {
-    /// Absolute path of the archive written.
+    /// True when nothing was written (no `execute`).
+    pub dry_run: bool,
+    /// Absolute path of the archive written (or that would be written).
     pub archive: String,
+    /// Path of the `sha256sum`-format sidecar.
+    pub checksum_path: String,
+    /// Hex SHA-256 of the archive; `None` on a dry run.
+    pub sha256: Option<String>,
 }
 
 /// **Back up the Home Assistant `/config` volume** to a `.tar.gz` in the
-/// destination directory. The regenerable `home-assistant.log`, `deps/`, and
-/// `tts/` trees are excluded — only durable config / `.storage` / db is
-/// archived.
-#[orca_tool(domain = "home-assistant", verb = "backup")]
-async fn ha_backup(args: HaBackupArgs, _ctx: &ToolCtx) -> Result<HaBackupOutput> {
+/// destination directory, plus a `.sha256` sidecar that `restore` verifies.
+/// The regenerable `home-assistant.log`, `deps/`, and `tts/` trees are
+/// excluded. Dry-run unless `execute` is set.
+#[orca_tool(domain = "home-assistant", verb = "backup", role = "admin")]
+async fn ha_backup(args: HaBackupArgs, ctx: &ToolCtx) -> Result<HaBackupOutput> {
+    crate::authz::require_admin(ctx)?;
     backup_config(&args).await
 }
 
@@ -336,15 +350,23 @@ async fn backup_config(args: &HaBackupArgs) -> Result<HaBackupOutput> {
     if !config.is_dir() {
         bail!("config path '{}' is not a directory", args.config_path);
     }
-    run(Command::new("mkdir").arg("-p").arg(&args.destination)).await?;
 
-    let stamp = now_stamp();
     let archive = format!(
         "{}/homeassistant-config-{}.tar.gz",
         args.destination.trim_end_matches('/'),
-        stamp
+        now_stamp()
     );
+    let checksum_path = format!("{archive}{CHECKSUM_SUFFIX}");
+    if !args.execute {
+        return Ok(HaBackupOutput {
+            dry_run: true,
+            archive,
+            checksum_path,
+            sha256: None,
+        });
+    }
 
+    run(Command::new("mkdir").arg("-p").arg(&args.destination)).await?;
     run(Command::new("tar")
         .arg("-czf")
         .arg(&archive)
@@ -356,7 +378,94 @@ async fn backup_config(args: &HaBackupArgs) -> Result<HaBackupOutput> {
         .arg("."))
     .await?;
 
-    Ok(HaBackupOutput { archive })
+    let sha256 = hash_file(&archive)?;
+    write_sidecar(&archive, &checksum_path, &sha256)?;
+
+    Ok(HaBackupOutput {
+        dry_run: false,
+        archive,
+        checksum_path,
+        sha256: Some(sha256),
+    })
+}
+
+fn hash_file(path: &str) -> Result<String> {
+    plugin_toolkit::hash::sha256_file(Path::new(path))
+        .with_context(|| format!("failed to hash '{path}'"))
+}
+
+/// Writes `<hex>  <basename>` (so `sha256sum -c` also checks it) via a
+/// sibling temp file and rename, so a reader never sees a partial sidecar.
+fn write_sidecar(archive: &str, checksum_path: &str, sha256: &str) -> Result<()> {
+    let name = Path::new(archive)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| archive.to_string());
+    let tmp = format!("{checksum_path}.tmp.{}", std::process::id());
+    std::fs::write(&tmp, format!("{sha256}  {name}\n"))
+        .with_context(|| format!("failed to write checksum '{tmp}'"))?;
+    std::fs::rename(&tmp, checksum_path)
+        .with_context(|| format!("failed to write checksum '{checksum_path}'"))
+}
+
+/// A copy of an archive in a fresh 0700 directory, removed on drop. Restore
+/// hashes and extracts this copy, so the file checked is the file extracted
+/// even if the original is replaced in between.
+struct PrivateCopy {
+    dir: std::path::PathBuf,
+    file: std::path::PathBuf,
+}
+
+impl Drop for PrivateCopy {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.dir) {
+            plugin_toolkit::tracing::warn!("failed to remove '{}': {e}", self.dir.display());
+        }
+    }
+}
+
+fn private_copy(archive: &str) -> Result<PrivateCopy> {
+    use std::os::unix::fs::DirBuilderExt;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("ha-restore-{}-{nanos}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .with_context(|| format!("failed to create '{}'", dir.display()))?;
+    let copy = PrivateCopy {
+        file: dir.join("archive.tar.gz"),
+        dir,
+    };
+    std::fs::copy(archive, &copy.file).with_context(|| format!("failed to copy '{archive}'"))?;
+    Ok(copy)
+}
+
+/// Copies `archive` privately, verifies the copy against the sidecar, and
+/// returns the digest with the verified copy. A missing or malformed sidecar
+/// fails: an unverifiable archive is never restored.
+///
+/// Trust model: the sidecar detects corruption and truncation (bit rot, a
+/// short copy, a full disk). It does not authenticate: anyone who can rewrite
+/// the archive can rewrite the sidecar beside it.
+fn verify_archive(archive: &str) -> Result<(String, PrivateCopy)> {
+    let checksum_path = format!("{archive}{CHECKSUM_SUFFIX}");
+    let raw = std::fs::read_to_string(&checksum_path).with_context(|| {
+        format!("checksum sidecar '{checksum_path}' missing; refusing an unverified archive")
+    })?;
+    let expected = raw
+        .split_whitespace()
+        .next()
+        .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        .with_context(|| format!("checksum sidecar '{checksum_path}' is malformed"))?
+        .to_ascii_lowercase();
+    let copy = private_copy(archive)?;
+    let actual = hash_file(&copy.file.to_string_lossy())?;
+    if actual != expected {
+        bail!("checksum mismatch for '{archive}': expected {expected}, got {actual}");
+    }
+    Ok((actual, copy))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -379,6 +488,10 @@ pub struct HaRestoreArgs {
     #[arg(long, default_value = "/opt/homeassistant/config")]
     #[serde(default = "default_config_path")]
     pub config_path: String,
+    /// Extract the archive. Without it the call verifies the checksum and stops.
+    #[arg(long)]
+    #[serde(default)]
+    pub execute: bool,
 }
 
 #[derive(
@@ -391,17 +504,23 @@ pub struct HaRestoreArgs {
 #[serde(rename_all = "camelCase")]
 #[derive(Debug)]
 pub struct HaRestoreOutput {
+    /// True when nothing was extracted (no `execute`).
+    pub dry_run: bool,
     /// True when extraction completed.
     pub restored: bool,
-    /// Where the config was restored to.
+    /// Hex SHA-256 the archive was verified against.
+    pub verified_sha256: String,
+    /// Where the config was (or would be) restored to.
     pub config_path: String,
 }
 
 /// **Restore the Home Assistant `/config` volume** from a `.tar.gz` produced by
-/// `home-assistant.backup`. The service should be stopped before restoring;
-/// this tool only extracts the archive over the config directory.
-#[orca_tool(domain = "home-assistant", verb = "restore")]
-async fn ha_restore(args: HaRestoreArgs, _ctx: &ToolCtx) -> Result<HaRestoreOutput> {
+/// `home-assistant.backup`. The archive is checksum-verified against its
+/// `.sha256` sidecar first, on dry runs too. The service should be stopped
+/// before an `execute` restore; this tool only extracts over the config dir.
+#[orca_tool(domain = "home-assistant", verb = "restore", role = "admin")]
+async fn ha_restore(args: HaRestoreArgs, ctx: &ToolCtx) -> Result<HaRestoreOutput> {
+    crate::authz::require_admin(ctx)?;
     restore_config(args).await
 }
 
@@ -410,15 +529,26 @@ async fn restore_config(args: HaRestoreArgs) -> Result<HaRestoreOutput> {
     if !Path::new(&args.from).is_file() {
         bail!("backup tarball '{}' not found", args.from);
     }
+    let (verified_sha256, copy) = verify_archive(&args.from)?;
+    if !args.execute {
+        return Ok(HaRestoreOutput {
+            dry_run: true,
+            restored: false,
+            verified_sha256,
+            config_path: args.config_path,
+        });
+    }
     run(Command::new("mkdir").arg("-p").arg(&args.config_path)).await?;
     run(Command::new("tar")
         .arg("-xzf")
-        .arg(&args.from)
+        .arg(&copy.file)
         .arg("-C")
         .arg(&args.config_path))
     .await?;
     Ok(HaRestoreOutput {
+        dry_run: false,
         restored: true,
+        verified_sha256,
         config_path: args.config_path,
     })
 }
@@ -441,10 +571,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_and_restore_refuse_non_admin_even_on_dry_run() {
+        use crate::authz::testing::{assert_refused, ctx};
+        let tmp = tempfile::tempdir().unwrap();
+        let config = fixture_config(tmp.path());
+        let dest = tmp.path().join("backups");
+        for c in [ctx(None), ctx(Some("user"))] {
+            let args = HaBackupArgs {
+                config_path: config.to_string_lossy().into_owned(),
+                destination: dest.to_string_lossy().into_owned(),
+                execute: false,
+            };
+            assert_refused(&ha_backup(args, &c).await.unwrap_err());
+            let args = HaRestoreArgs {
+                from: "/nonexistent/x.tar.gz".into(),
+                config_path: "/nonexistent/c".into(),
+                execute: false,
+            };
+            // Refused before the missing archive is even noticed.
+            assert_refused(&ha_restore(args, &c).await.unwrap_err());
+        }
+        let args = HaBackupArgs {
+            config_path: config.to_string_lossy().into_owned(),
+            destination: dest.to_string_lossy().into_owned(),
+            execute: false,
+        };
+        assert!(ha_backup(args, &ctx(Some("admin"))).await.unwrap().dry_run);
+    }
+
+    #[tokio::test]
     async fn backup_rejects_missing_config_dir() {
         let args = HaBackupArgs {
             config_path: "/nonexistent/homeassistant/config/path".to_string(),
             destination: "/tmp/homeassistant-test-dest".to_string(),
+            execute: true,
         };
         let err = backup_config(&args).await.unwrap_err();
         assert!(err.to_string().contains("not a directory"), "{err}");
@@ -455,38 +615,171 @@ mod tests {
         let args = HaRestoreArgs {
             from: "/nonexistent/backup.tar.gz".to_string(),
             config_path: "/tmp/homeassistant-test-restore".to_string(),
+            execute: true,
         };
         let err = restore_config(args).await.unwrap_err();
         assert!(err.to_string().contains("not found"), "{err}");
     }
 
-    #[tokio::test]
-    async fn backup_then_restore_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let config = tmp.path().join("config");
+    fn fixture_config(root: &Path) -> std::path::PathBuf {
+        let config = root.join("config");
         std::fs::create_dir_all(config.join(".storage")).unwrap();
         std::fs::write(config.join("configuration.yaml"), b"default_config:").unwrap();
         std::fs::write(config.join(".storage").join("core.config"), b"{}").unwrap();
-        // deps must be excluded
         std::fs::create_dir_all(config.join("deps")).unwrap();
         std::fs::write(config.join("deps").join("junk"), b"x").unwrap();
+        config
+    }
 
+    async fn executed_backup(root: &Path) -> HaBackupOutput {
+        let config = fixture_config(root);
+        backup_config(&HaBackupArgs {
+            config_path: config.to_string_lossy().into_owned(),
+            destination: root.join("backups").to_string_lossy().into_owned(),
+            execute: true,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn backup_defaults_to_dry_run_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = fixture_config(tmp.path());
         let dest = tmp.path().join("backups");
         let out = backup_config(&HaBackupArgs {
             config_path: config.to_string_lossy().into_owned(),
             destination: dest.to_string_lossy().into_owned(),
+            execute: false,
         })
         .await
         .unwrap();
+        assert!(out.dry_run);
+        assert!(out.sha256.is_none());
+        assert!(!dest.exists());
+    }
+
+    #[tokio::test]
+    async fn backup_writes_sha256sum_compatible_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
+        let sha = out.sha256.clone().unwrap();
+        let sidecar = std::fs::read_to_string(&out.checksum_path).unwrap();
+        let name = Path::new(&out.archive)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert_eq!(sidecar, format!("{sha}  {name}\n"));
+        assert_eq!(
+            sha,
+            plugin_toolkit::hash::sha256_file(Path::new(&out.archive)).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_dry_run_verifies_but_does_not_extract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
+        let target = tmp.path().join("restored");
+        let r = restore_config(HaRestoreArgs {
+            from: out.archive.clone(),
+            config_path: target.to_string_lossy().into_owned(),
+            execute: false,
+        })
+        .await
+        .unwrap();
+        assert!(r.dry_run && !r.restored);
+        assert_eq!(Some(r.verified_sha256), out.sha256);
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_tampered_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
+        let mut bytes = std::fs::read(&out.archive).unwrap();
+        bytes.push(0);
+        std::fs::write(&out.archive, bytes).unwrap();
+        let target = tmp.path().join("restored");
+        let err = restore_config(HaRestoreArgs {
+            from: out.archive.clone(),
+            config_path: target.to_string_lossy().into_owned(),
+            execute: true,
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_archive_without_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
+        std::fs::remove_file(&out.checksum_path).unwrap();
+        let err = restore_config(HaRestoreArgs {
+            from: out.archive.clone(),
+            config_path: tmp.path().join("r").to_string_lossy().into_owned(),
+            execute: true,
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("missing"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_malformed_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
+        std::fs::write(&out.checksum_path, "nothex  x\n").unwrap();
+        let err = verify_archive(&out.archive).err().unwrap();
+        assert!(err.to_string().contains("malformed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn restore_extracts_the_verified_copy_and_cleans_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
+        let (_, copy) = verify_archive(&out.archive).unwrap();
+        let dir = copy.dir.clone();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Swapping the original after verification does not affect the copy.
+        std::fs::write(&out.archive, b"tampered").unwrap();
+        assert_eq!(
+            plugin_toolkit::hash::sha256_file(&copy.file).unwrap(),
+            out.sha256.clone().unwrap()
+        );
+        drop(copy);
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn sidecar_write_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("x.tar.gz");
+        let c = tmp.path().join("x.tar.gz.sha256");
+        write_sidecar(&a.to_string_lossy(), &c.to_string_lossy(), "ab").unwrap();
+        assert_eq!(std::fs::read_to_string(&c).unwrap(), "ab  x.tar.gz\n");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn backup_then_restore_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = executed_backup(tmp.path()).await;
         assert!(Path::new(&out.archive).is_file());
 
         let restore_target = tmp.path().join("restored");
-        restore_config(HaRestoreArgs {
+        let r = restore_config(HaRestoreArgs {
             from: out.archive.clone(),
             config_path: restore_target.to_string_lossy().into_owned(),
+            execute: true,
         })
         .await
         .unwrap();
+        assert!(r.restored && !r.dry_run);
 
         assert!(restore_target.join("configuration.yaml").is_file());
         assert!(restore_target
