@@ -5,6 +5,7 @@
 
 pub(crate) mod authz;
 pub mod lifecycle;
+pub mod mounts;
 pub mod tools;
 pub mod voice;
 
