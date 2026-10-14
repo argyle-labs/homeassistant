@@ -152,5 +152,5 @@ that is offline does not turn its entities into ghosts.
 
 `home-assistant.expose-purge` un-exposes every ghost from every assistant,
 and only while HA reports `RUNNING`.
-It requires the `admin` role (dry runs too) and is dry-run unless `--execute`; an executed purge re-lists and fails if
+It requires the `admin` role (dry runs too) and executes by default (`--dry-run` previews); an executed purge re-lists and fails if
 any ghost is still exposed.

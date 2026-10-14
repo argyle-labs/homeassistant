@@ -214,19 +214,20 @@ pub struct PurgeArgs {
     #[arg(long)]
     pub endpoint: String,
     #[arg(long)]
+    /// Report the change without writing it.
     #[serde(default)]
-    pub execute: bool,
+    pub dry_run: bool,
 }
 
 /// **Un-expose ghost records** [MUTATES STATE]: records exposed to an
 /// assistant for entities that no longer exist. Requires admin, for dry runs
-/// too. Dry-run unless `execute`; an executed purge is confirmed by re-listing.
+/// too. Executes unless `dry_run`; an executed purge is confirmed by re-listing.
 #[orca_tool(domain = "home-assistant", verb = "expose-purge", role = "admin")]
 async fn ha_expose_purge(args: PurgeArgs, ctx: &ToolCtx) -> Result<PurgeOutput> {
     crate::authz::require_admin(ctx)?;
     let cfg = crate::tools::endpoint_config(&args.endpoint)?;
     let mut ws = crate::ws::connect(&cfg).await?;
-    purge(&mut ws, args.execute).await
+    purge(&mut ws, !args.dry_run).await
 }
 
 #[cfg(test)]
@@ -313,7 +314,7 @@ mod tests {
         for c in [ctx(None), ctx(Some("user"))] {
             let args = PurgeArgs {
                 endpoint: "nope".into(),
-                execute: false,
+                dry_run: true,
             };
             assert_refused(&ha_expose_purge(args, &c).await.unwrap_err());
         }
