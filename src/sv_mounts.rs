@@ -345,8 +345,9 @@ pub struct MountSpecArgs {
     #[serde(default)]
     pub password_secret: Option<String>,
     #[arg(long)]
+    /// Report the change without writing it.
     #[serde(default)]
-    pub execute: bool,
+    pub dry_run: bool,
 }
 
 /// Secret names for a CIFS mount's credentials.
@@ -582,13 +583,13 @@ async fn ha_mount_health(cfg: crate::Config) -> Result<HealthReport> {
 }
 
 /// **Create a Supervisor mount** [MUTATES STATE]. Requires admin, for dry
-/// runs too. Dry-run unless `execute`. CIFS credentials come from orca
+/// runs too. Executes unless `dry_run`. CIFS credentials come from orca
 /// secrets, never arguments; the plan shows only their names.
 #[orca_tool(domain = "home-assistant", verb = "mount-create", role = "admin")]
 async fn ha_mount_create(args: MountSpecArgs, ctx: &ToolCtx) -> Result<MountChangeOutput> {
     crate::authz::require_admin(ctx)?;
     let shown = build_body(&args, true, &|n| checked_placeholder(n, &secret_exists))?;
-    let real = if args.execute {
+    let real = if !args.dry_run {
         Some(build_body(&args, true, &real_secret)?)
     } else {
         None
@@ -602,7 +603,7 @@ async fn ha_mount_create(args: MountSpecArgs, ctx: &ToolCtx) -> Result<MountChan
         Some(shown),
         real,
         &args.name,
-        args.execute,
+        !args.dry_run,
     )
     .await?;
     verify_present(&out, &args.name, true)?;
@@ -610,12 +611,12 @@ async fn ha_mount_create(args: MountSpecArgs, ctx: &ToolCtx) -> Result<MountChan
 }
 
 /// **Update a Supervisor mount** [MUTATES STATE]. Requires admin, for dry
-/// runs too. Dry-run unless `execute`.
+/// runs too. Executes unless `dry_run`.
 #[orca_tool(domain = "home-assistant", verb = "mount-update", role = "admin")]
 async fn ha_mount_update(args: MountSpecArgs, ctx: &ToolCtx) -> Result<MountChangeOutput> {
     crate::authz::require_admin(ctx)?;
     let shown = build_body(&args, false, &|n| checked_placeholder(n, &secret_exists))?;
-    let real = if args.execute {
+    let real = if !args.dry_run {
         Some(build_body(&args, false, &real_secret)?)
     } else {
         None
@@ -630,7 +631,7 @@ async fn ha_mount_update(args: MountSpecArgs, ctx: &ToolCtx) -> Result<MountChan
         Some(shown),
         real,
         &args.name,
-        args.execute,
+        !args.dry_run,
     )
     .await?;
     if let Some(after) = &out.after {
@@ -658,12 +659,13 @@ pub struct MountNameArgs {
     #[serde(default)]
     pub allow_default: bool,
     #[arg(long)]
+    /// Report the change without writing it.
     #[serde(default)]
-    pub execute: bool,
+    pub dry_run: bool,
 }
 
 /// **Delete a Supervisor mount** [MUTATES STATE]. Requires admin, for dry
-/// runs too. Dry-run unless `execute`. Refuses the default backup mount
+/// runs too. Executes unless `dry_run`. Refuses the default backup mount
 /// without `allowDefault`: deleting it orphans the backup estate.
 #[orca_tool(domain = "home-assistant", verb = "mount-delete", role = "admin")]
 async fn ha_mount_delete(args: MountNameArgs, ctx: &ToolCtx) -> Result<MountChangeOutput> {
@@ -687,7 +689,7 @@ async fn ha_mount_delete(args: MountNameArgs, ctx: &ToolCtx) -> Result<MountChan
         None,
         None,
         &args.name,
-        args.execute,
+        !args.dry_run,
     )
     .await?;
     verify_present(&out, &args.name, false)?;
@@ -695,7 +697,7 @@ async fn ha_mount_delete(args: MountNameArgs, ctx: &ToolCtx) -> Result<MountChan
 }
 
 /// **Reload a Supervisor mount** [MUTATES STATE]: discards a stale session
-/// and mounts fresh. Requires admin, for dry runs too. Dry-run unless `execute`.
+/// and mounts fresh. Requires admin, for dry runs too. Executes unless `dry_run`.
 #[orca_tool(domain = "home-assistant", verb = "mount-reload", role = "admin")]
 async fn ha_mount_reload(args: MountNameArgs, ctx: &ToolCtx) -> Result<MountChangeOutput> {
     crate::authz::require_admin(ctx)?;
@@ -711,7 +713,7 @@ async fn ha_mount_reload(args: MountNameArgs, ctx: &ToolCtx) -> Result<MountChan
         None,
         None,
         &args.name,
-        args.execute,
+        !args.dry_run,
     )
     .await
 }
@@ -732,12 +734,13 @@ pub struct MountOptionsArgs {
     #[arg(long)]
     pub default_backup_mount: String,
     #[arg(long)]
+    /// Report the change without writing it.
     #[serde(default)]
-    pub execute: bool,
+    pub dry_run: bool,
 }
 
 /// **Set the default backup mount** [MUTATES STATE]. Requires admin, for dry
-/// runs too. Dry-run unless `execute`; verified by re-reading.
+/// runs too. Executes unless `dry_run`; verified by re-reading.
 #[orca_tool(domain = "home-assistant", verb = "mount-options", role = "admin")]
 async fn ha_mount_options(args: MountOptionsArgs, ctx: &ToolCtx) -> Result<MountChangeOutput> {
     crate::authz::require_admin(ctx)?;
@@ -762,7 +765,7 @@ async fn ha_mount_options(args: MountOptionsArgs, ctx: &ToolCtx) -> Result<Mount
         Some(body.clone()),
         Some(body),
         &args.default_backup_mount,
-        args.execute,
+        !args.dry_run,
     )
     .await?;
     if let Some(after) = &out.after {
@@ -856,7 +859,7 @@ mod tests {
             read_only: true,
             username_secret: None,
             password_secret: None,
-            execute: false,
+            dry_run: true,
         }
     }
 
@@ -901,7 +904,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn change_is_dry_run_by_default_and_sends_nothing() {
+    async fn dry_run_change_sends_nothing() {
         let ha = FakeHa::new().on("supervisor/api", |v| {
             assert_eq!(v["method"], "get", "dry run must only read");
             json!({"mounts": [{"name": "willow", "type": "nfs", "usage": "backup", "server": "s", "state": "inactive"}]})
@@ -1000,14 +1003,14 @@ mod tests {
                 endpoint: "nope".into(),
                 name: "willow".into(),
                 allow_default: false,
-                execute: false,
+                dry_run: true,
             };
             assert_refused(&ha_mount_delete(n(), &c).await.unwrap_err());
             assert_refused(&ha_mount_reload(n(), &c).await.unwrap_err());
             let o = MountOptionsArgs {
                 endpoint: "nope".into(),
                 default_backup_mount: "willow".into(),
-                execute: false,
+                dry_run: true,
             };
             assert_refused(&ha_mount_options(o, &c).await.unwrap_err());
         }

@@ -156,8 +156,8 @@ mounts anything itself.
 | `mount-reload` | yes | Discards a stale session and mounts fresh. |
 | `mount-options` | yes | Sets `default_backup_mount` (must be an existing backup mount). |
 
-Every mutating verb requires the `admin` role (dry runs too), is dry-run unless
-`--execute`, and returns the re-read mount list after an executed call. A dry
+Every mutating verb requires the `admin` role (dry runs too), executes by
+default (`--dry-run` previews), and returns the re-read mount list after an executed call. A dry
 run of `mount-create`/`mount-update` fails if a referenced secret does not
 exist; `mount-update` fails if any requested field did not read back. A mount path that
 is a subdirectory of the server's export is legal and is not flagged.
