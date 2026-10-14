@@ -164,6 +164,6 @@ entity by "the <area> <noun>": the name with its area removed from the front
 or back ("Living Room Overhead" → `overhead`). It skips nouns that are
 plural, under 4 characters, already present, or that would collide with
 another entity in the same area, and reports why. It requires the `admin`
-role (dry runs too) and is dry-run unless `--execute`. Each write re-reads the
+role (dry runs too) and executes by default (`--dry-run` previews). Each write re-reads the
 entity first and keeps every alias it has at that moment, then is verified by
 re-reading. If any write fails, the call fails and lists what was applied.

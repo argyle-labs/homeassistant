@@ -175,10 +175,10 @@ pub struct AliasArgs {
     /// Registered endpoint name.
     #[arg(long)]
     pub endpoint: String,
-    /// Add the suggested aliases. Without it the call returns the plan only.
+    /// Return the plan without adding the aliases.
     #[arg(long)]
     #[serde(default)]
-    pub execute: bool,
+    pub dry_run: bool,
 }
 
 #[derive(
@@ -257,7 +257,7 @@ pub(crate) async fn apply<T: crate::ws::WsTransport>(
 }
 
 /// **Suggest and add bare-noun aliases** [MUTATES STATE]. Requires admin, for
-/// dry runs too. Dry-run unless `execute`: returns each entity's proposed bare
+/// dry runs too. With `dry_run`, returns each entity's proposed bare
 /// noun and why others were skipped (plural, short, collision, present). Each
 /// executed write keeps existing aliases and is verified by re-reading.
 #[orca_tool(domain = "home-assistant", verb = "naming-aliases", role = "admin")]
@@ -268,7 +268,7 @@ async fn ha_naming_aliases(args: AliasArgs, ctx: &ToolCtx) -> Result<AliasOutput
     let entities = crate::registry::entities(&mut ws).await?;
     let areas = crate::registry::areas(&mut ws).await?;
     let p = plan(&entities, &areas);
-    let out = apply(&mut ws, p, args.execute).await;
+    let out = apply(&mut ws, p, !args.dry_run).await;
     if !out.success {
         bail!(
             "{} alias write(s) failed: {}; applied: {}",
@@ -433,7 +433,7 @@ mod tests {
         for c in [ctx(None), ctx(Some("user"))] {
             let args = AliasArgs {
                 endpoint: "nope".into(),
-                execute: false,
+                dry_run: true,
             };
             assert_refused(&ha_naming_aliases(args, &c).await.unwrap_err());
         }
