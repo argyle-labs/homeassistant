@@ -46,8 +46,8 @@ Home Assistant publishes `stable`, `beta`, and `dev` tags on
 host paths such as a media share or a backup target into the container.
 Host paths must sit under `/mnt/`, `/media/`, `/srv/` or `/data/`; paths may
 only use `A-Z a-z 0-9 . _ / -`. `/config`, `/etc/localtime`, and `/run/dbus` are
-reserved targets, and two mounts may not share a target. `install` is dry-run unless `--execute` is passed; the dry
-run validates the mounts and returns the planned steps. `install` and
+reserved targets, and two mounts may not share a target. `install` executes by default; `--dry-run`
+validates the mounts and returns the planned steps. `install` and
 `upgrade` require the `admin` role, for dry runs too.
 
 - **Docker:** mounts are written to `compose.mounts.yml` beside `compose.yml`
@@ -78,7 +78,7 @@ starting it again; run `sha256sum -c "$f.sha256"` first and do not restore an
 archive that fails it.
 
 With orca, `home-assistant.backup` / `home-assistant.restore` perform exactly
-this. Both are dry-run unless `--execute` is passed, and both require the
+this. Both execute by default (`--dry-run` previews), and both require the
 `admin` role, for dry runs too. `backup` writes a
 `<archive>.sha256` sidecar and re-verifies it; `restore` verifies the archive
 against that sidecar (on dry runs too) and refuses a missing, malformed, or
