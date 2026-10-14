@@ -134,7 +134,7 @@ unavailable".
 |---|---|---|
 | `home-assistant.registry-entities` | no | Every entity with name, aliases, area, device, hidden/disabled, platform. |
 | `home-assistant.registry-areas` | no | Areas with aliases and floor. |
-| `home-assistant.registry-update` | yes | Set name, aliases, or area on one entity (an empty `--name` or `--area-id` clears it). Admin only (dry runs too). Dry-run unless `--execute`; each write is confirmed by re-reading the entity. |
+| `home-assistant.registry-update` | yes | Set name, aliases, or area on one entity (an empty `--name` or `--area-id` clears it). Admin only (dry runs too). Executes by default; `--dry-run` previews; each write is confirmed by re-reading the entity. |
 
 Registry traps the client handles: `entity_registry/list` omits aliases (the
 client reads `get_entries`, falling back to `get`); `aliases: [null]` means

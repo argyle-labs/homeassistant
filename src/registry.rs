@@ -277,13 +277,14 @@ pub struct RegistryUpdateArgs {
     #[serde(default)]
     pub area_id: Option<String>,
     #[arg(long)]
+    /// Report the change without writing it.
     #[serde(default)]
-    pub execute: bool,
+    pub dry_run: bool,
 }
 
 /// **Update one entity's name, aliases, or area** [MUTATES STATE]. Requires
-/// admin, for dry runs too. Dry-run unless `execute`: the dry run returns the
-/// current entry and the change. An executed write is confirmed by re-reading
+/// admin, for dry runs too. With `dry_run` it returns the current entry and the
+/// change without writing. An executed write is confirmed by re-reading
 /// the entity.
 #[orca_tool(domain = "home-assistant", verb = "registry-update", role = "admin")]
 async fn ha_registry_update(
@@ -302,7 +303,7 @@ async fn ha_registry_update(
     let cfg = crate::tools::endpoint_config(&args.endpoint)?;
     let mut ws = crate::ws::connect(&cfg).await?;
     let before = get_one(&mut ws, &args.entity_id).await?;
-    if !args.execute {
+    if args.dry_run {
         return Ok(RegistryUpdateOutput {
             dry_run: true,
             before,
@@ -474,7 +475,7 @@ mod tests {
                 name: Some("Lamp".into()),
                 aliases: None,
                 area_id: None,
-                execute: false,
+                dry_run: true,
             };
             assert_refused(&ha_registry_update(args, &c).await.unwrap_err());
         }
