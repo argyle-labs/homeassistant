@@ -5,7 +5,9 @@ use plugin_toolkit::contract::backup::BackupRecord;
 use plugin_toolkit::delegated_ws::WsClient;
 use plugin_toolkit::prelude::*;
 use plugin_toolkit::serde_json::{json, Value};
-use plugin_toolkit::time::Timestamp;
+use plugin_toolkit::time::{Deadline, Timestamp};
+
+use std::time::Duration;
 
 use crate::Client;
 
@@ -14,6 +16,24 @@ pub const RECORD_KIND: &str = "home-assistant";
 const ON_BOX_AGENTS: &[&str] = &["hassio.local", "backup.local"];
 
 const MAX_MESSAGE_BYTES: u64 = 16 << 20;
+
+const MAX_SKIPPED_MESSAGES: usize = 256;
+
+const WS_BUDGET: Duration = Duration::from_secs(60);
+
+const MAX_UPSTREAM_TEXT: usize = 64;
+
+const FUTURE_SKEW_MS: i64 = 5 * 60_000;
+
+pub fn upstream_text(v: &Value) -> String {
+    let raw = match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    let scrubbed = plugin_toolkit::scrub::scrub_line(&raw).into_owned();
+    scrubbed.chars().take(MAX_UPSTREAM_TEXT).collect()
+}
 
 pub fn is_off_box(agent_id: &str) -> bool {
     !ON_BOX_AGENTS.contains(&agent_id)
@@ -39,6 +59,11 @@ async fn recv_json(ws: &WsClient) -> Result<Value> {
 
 impl Client {
     pub async fn ws_commands(&self, types: &[&str]) -> Result<Vec<Value>> {
+        self.ws_commands_within(types, WS_BUDGET).await
+    }
+
+    async fn ws_commands_within(&self, types: &[&str], budget: Duration) -> Result<Vec<Value>> {
+        let deadline = Deadline::after(budget);
         let ws = WsClient::connect(WsOpen {
             url: ws_url(&self.cfg.base_url),
             headers: Vec::new(),
@@ -49,31 +74,40 @@ impl Client {
         .await?;
         let hello = recv_json(&ws).await?;
         if hello["type"] != "auth_required" {
-            bail!("unexpected websocket greeting: {}", hello["type"]);
+            bail!(
+                "unexpected websocket greeting: {}",
+                upstream_text(&hello["type"])
+            );
         }
         ws.send(json!({"type": "auth", "access_token": self.cfg.token}).to_string())
             .await?;
         let auth = recv_json(&ws).await?;
         if auth["type"] != "auth_ok" {
-            bail!("home assistant rejected the token ({})", auth["type"]);
+            bail!(
+                "home assistant rejected the token ({})",
+                upstream_text(&auth["type"])
+            );
         }
         let mut out = Vec::with_capacity(types.len());
         for (i, ty) in types.iter().enumerate() {
             let id = i as u64 + 1;
             ws.send(json!({"id": id, "type": ty}).to_string()).await?;
+            let mut skipped = 0;
             let reply = loop {
+                if deadline.reached() {
+                    bail!("{ty}: no reply within {}s", budget.as_secs());
+                }
                 let msg = recv_json(&ws).await?;
                 if msg["id"] == id && msg["type"] == "result" {
                     break msg;
                 }
+                skipped += 1;
+                if skipped > MAX_SKIPPED_MESSAGES {
+                    bail!("{ty}: more than {MAX_SKIPPED_MESSAGES} unrelated messages before the reply");
+                }
             };
             if reply["success"] != true {
-                bail!(
-                    "{ty} failed: {}",
-                    reply["error"]["message"]
-                        .as_str()
-                        .unwrap_or("unknown error")
-                );
+                bail!("{ty} failed: {}", upstream_text(&reply["error"]["message"]));
             }
             out.push(reply["result"].clone());
         }
@@ -158,9 +192,38 @@ pub struct HaBackup {
 pub struct HaBackupList {
     pub backups: Vec<HaBackup>,
     pub agents: Vec<String>,
-    pub agent_errors: Vec<String>,
+    pub agent_errors: Vec<AgentError>,
     pub last_attempted_automatic_backup: Option<String>,
     pub last_completed_automatic_backup: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct AgentError {
+    pub agent_id: String,
+    pub class: String,
+}
+
+fn error_class(v: &Value) -> String {
+    let text = upstream_text(v);
+    let head = text.split([':', '(', '\n']).next().unwrap_or("").trim();
+    if head.is_empty() {
+        "error".to_string()
+    } else {
+        head.to_string()
+    }
 }
 
 fn str_opt(v: &Value) -> Option<String> {
@@ -249,7 +312,10 @@ pub fn parse_list(instance: &str, info: &Value, agents: &Value) -> HaBackupList 
         .as_object()
         .map(|m| {
             m.iter()
-                .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or("error")))
+                .map(|(k, v)| AgentError {
+                    agent_id: upstream_text(&Value::String(k.clone())),
+                    class: error_class(v),
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -263,6 +329,7 @@ pub fn parse_list(instance: &str, info: &Value, agents: &Value) -> HaBackupList 
         agent_errors,
         last_attempted_automatic_backup: str_opt(&info["last_attempted_automatic_backup"]),
         last_completed_automatic_backup: str_opt(&info["last_completed_automatic_backup"]),
+        warnings: Vec::new(),
     }
 }
 
@@ -289,6 +356,32 @@ pub enum CheckStatus {
 #[derive(
     Debug,
     Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum Problem {
+    NoBackups,
+    NewestStale,
+    NoOffBoxCopy,
+    OffBoxStale,
+    FutureDated,
+    NewestFailedOnAgents,
+    AutomaticAttemptIncomplete,
+    NoOffBoxAgentEnrolled,
+    SingleOffBoxAgentEnrolled,
+    AgentErrors,
+}
+
+#[derive(
+    Debug,
+    Clone,
     plugin_toolkit::serde::Serialize,
     plugin_toolkit::serde::Deserialize,
     plugin_toolkit::schemars::JsonSchema,
@@ -298,15 +391,19 @@ pub enum CheckStatus {
 #[serde(rename_all = "camelCase")]
 pub struct HaBackupCheck {
     pub status: CheckStatus,
-    pub newest_backup_id: Option<String>,
+    pub backup_count: usize,
     pub newest_age_hours: Option<i64>,
     pub newest_off_box_age_hours: Option<i64>,
     pub max_age_hours: i64,
-    pub last_attempted_automatic_backup: Option<String>,
-    pub last_completed_automatic_backup: Option<String>,
+    pub last_attempted_automatic_backup_ms: Option<i64>,
+    pub last_completed_automatic_backup_ms: Option<i64>,
     pub enrolled_agent_ids: Vec<String>,
+    pub failed_agent_ids: Vec<String>,
+    pub error_agent_ids: Vec<String>,
     pub checksum_verified: bool,
-    pub problems: Vec<String>,
+    pub problems: Vec<Problem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 pub fn check(
@@ -321,44 +418,54 @@ pub fn check(
         .backups
         .iter()
         .find(|b| b.copies.iter().any(|c| c.off_box));
-    let enrolled = str_list(&config["config"]["create_backup"]["agent_ids"]);
+    let enrolled: Vec<String> = str_list(&config["config"]["create_backup"]["agent_ids"])
+        .iter()
+        .map(|a| upstream_text(&Value::String(a.clone())))
+        .collect();
     let mut problems = Vec::new();
 
     let newest_age = newest.map(|b| hours(b.created_ms));
     let off_box_age = newest_off_box.map(|b| hours(b.created_ms));
     let mut status = match newest_age {
         None => {
-            problems.push("no backups found".to_string());
+            problems.push(Problem::NoBackups);
             CheckStatus::Missing
         }
         Some(age) if age > max_age_hours => {
-            problems.push(format!(
-                "newest backup is {age}h old (limit {max_age_hours}h)"
-            ));
+            problems.push(Problem::NewestStale);
             CheckStatus::Stale
         }
         Some(_) => CheckStatus::Ok,
     };
-    let mut degrade = |msg: String, problems: &mut Vec<String>| {
-        problems.push(msg);
+    let mut degrade = |p: Problem, problems: &mut Vec<Problem>| {
+        problems.push(p);
         if status == CheckStatus::Ok {
             status = CheckStatus::Degraded;
         }
     };
 
+    if list
+        .backups
+        .iter()
+        .any(|b| b.created_ms > now_ms + FUTURE_SKEW_MS)
+    {
+        degrade(Problem::FutureDated, &mut problems);
+    }
     match off_box_age {
-        None if newest.is_some() => degrade("no backup has an off-box copy".into(), &mut problems),
-        Some(age) if age > max_age_hours => degrade(
-            format!("newest off-box backup is {age}h old (limit {max_age_hours}h)"),
-            &mut problems,
-        ),
+        None if newest.is_some() => degrade(Problem::NoOffBoxCopy, &mut problems),
+        Some(age) if age > max_age_hours => degrade(Problem::OffBoxStale, &mut problems),
         _ => {}
     }
-    if let Some(b) = newest.filter(|b| !b.failed_agent_ids.is_empty()) {
-        degrade(
-            format!("newest backup failed on {}", b.failed_agent_ids.join(", ")),
-            &mut problems,
-        );
+    let failed_agent_ids = newest
+        .map(|b| {
+            b.failed_agent_ids
+                .iter()
+                .map(|a| upstream_text(&Value::String(a.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+    if newest.is_some_and(|b| !b.failed_agent_ids.is_empty()) {
+        degrade(Problem::NewestFailedOnAgents, &mut problems);
     }
     let attempted = list
         .last_attempted_automatic_backup
@@ -370,40 +477,46 @@ pub fn check(
         .and_then(parse_ms);
     if let Some(a) = attempted {
         if completed.is_none_or(|c| c < a) {
-            degrade(
-                "last automatic backup attempt did not complete".into(),
-                &mut problems,
-            );
+            degrade(Problem::AutomaticAttemptIncomplete, &mut problems);
         }
     }
-    let off_box_enrolled = enrolled.iter().filter(|a| is_off_box(a)).count();
-    match off_box_enrolled {
-        0 => degrade(
-            "no off-box agent enrolled in automatic backups".into(),
-            &mut problems,
-        ),
-        1 => degrade(
-            "only one off-box agent enrolled in automatic backups".into(),
-            &mut problems,
-        ),
+    match enrolled.iter().filter(|a| is_off_box(a)).count() {
+        0 => degrade(Problem::NoOffBoxAgentEnrolled, &mut problems),
+        1 => degrade(Problem::SingleOffBoxAgentEnrolled, &mut problems),
         _ => {}
     }
-    for e in &list.agent_errors {
-        degrade(format!("agent error: {e}"), &mut problems);
+    if !list.agent_errors.is_empty() {
+        degrade(Problem::AgentErrors, &mut problems);
     }
 
     HaBackupCheck {
         status,
-        newest_backup_id: newest.map(|b| b.backup_id.clone()),
+        backup_count: list.backups.len(),
         newest_age_hours: newest_age,
         newest_off_box_age_hours: off_box_age,
         max_age_hours,
-        last_attempted_automatic_backup: list.last_attempted_automatic_backup.clone(),
-        last_completed_automatic_backup: list.last_completed_automatic_backup.clone(),
+        last_attempted_automatic_backup_ms: attempted,
+        last_completed_automatic_backup_ms: completed,
         enrolled_agent_ids: enrolled,
+        failed_agent_ids,
+        error_agent_ids: list
+            .agent_errors
+            .iter()
+            .map(|e| e.agent_id.clone())
+            .collect(),
         checksum_verified: false,
         problems,
+        warnings: Vec::new(),
     }
+}
+
+pub const MAX_AGE_HOURS_RANGE: std::ops::RangeInclusive<i64> = 1..=8760;
+
+pub fn validate_max_age_hours(h: i64) -> Result<()> {
+    if !MAX_AGE_HOURS_RANGE.contains(&h) {
+        bail!("max_age_hours must be between 1 and 8760, got {h}");
+    }
+    Ok(())
 }
 
 impl Client {
@@ -415,6 +528,7 @@ impl Client {
     }
 
     pub async fn backup_check(&self, instance: &str, max_age_hours: i64) -> Result<HaBackupCheck> {
+        validate_max_age_hours(max_age_hours)?;
         let r = self
             .ws_commands(&["backup/info", "backup/agents/info", "backup/config/info"])
             .await?;
@@ -542,7 +656,7 @@ mod tests {
         assert_eq!(c.status, CheckStatus::Degraded);
         assert_eq!(c.newest_age_hours, Some(5));
         assert!(!c.checksum_verified);
-        assert!(c.problems.iter().any(|p| p.contains("only one off-box")));
+        assert!(c.problems.contains(&Problem::SingleOffBoxAgentEnrolled));
     }
 
     #[test]
@@ -565,7 +679,7 @@ mod tests {
             now(),
         );
         assert_eq!(c.status, CheckStatus::Missing);
-        assert!(c.newest_backup_id.is_none());
+        assert_eq!(c.backup_count, 0);
     }
 
     #[test]
@@ -576,11 +690,9 @@ mod tests {
         let l = parse_list("i", &i, &agents());
         let c = check(&l, &config(&["hassio.willow", "hassio.maple"]), 48, now());
         assert_eq!(c.status, CheckStatus::Degraded);
-        assert!(c.problems.iter().any(|p| p.contains("did not complete")));
-        assert!(c
-            .problems
-            .iter()
-            .any(|p| p.contains("failed on hassio.willow")));
+        assert!(c.problems.contains(&Problem::AutomaticAttemptIncomplete));
+        assert!(c.problems.contains(&Problem::NewestFailedOnAgents));
+        assert_eq!(c.failed_agent_ids, ["hassio.willow"]);
     }
 
     #[test]
@@ -662,5 +774,109 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("backup/info failed: Unauthorized"));
+    }
+
+    #[test]
+    fn future_dated_backup_degrades() {
+        let mut i = info();
+        i["backups"][0]["date"] = json!("2027-01-01T00:00:00+00:00");
+        let l = parse_list("i", &i, &agents());
+        let c = check(&l, &config(&["hassio.willow", "hassio.maple"]), 48, now());
+        assert_eq!(c.status, CheckStatus::Degraded);
+        assert!(c.problems.contains(&Problem::FutureDated));
+    }
+
+    #[test]
+    fn max_age_hours_bounds() {
+        for bad in [0, -1, 8761] {
+            assert!(validate_max_age_hours(bad).is_err(), "{bad}");
+        }
+        for ok in [1, 48, 8760] {
+            assert!(validate_max_age_hours(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn agent_errors_keep_id_and_short_scrubbed_class() {
+        let mut i = info();
+        let long = format!(
+            "BackupAgentUnreachableError: password=hunter2 {}",
+            "x".repeat(200)
+        );
+        i["agent_errors"] = json!({"hassio.willow": long});
+        let l = parse_list("i", &i, &agents());
+        assert_eq!(l.agent_errors.len(), 1);
+        assert_eq!(l.agent_errors[0].agent_id, "hassio.willow");
+        assert_eq!(l.agent_errors[0].class, "BackupAgentUnreachableError");
+        let c = check(&l, &config(&["hassio.willow", "hassio.maple"]), 48, now());
+        assert!(c.problems.contains(&Problem::AgentErrors));
+        assert_eq!(c.error_agent_ids, ["hassio.willow"]);
+    }
+
+    #[test]
+    fn upstream_text_is_capped_and_scrubbed() {
+        let t = upstream_text(&json!(format!(
+            "Authorization: Bearer abc123secret {}",
+            "y".repeat(500)
+        )));
+        assert!(t.chars().count() <= MAX_UPSTREAM_TEXT);
+        assert!(!t.contains("abc123secret"), "{t}");
+    }
+
+    #[test]
+    fn check_output_carries_no_names_or_error_text() {
+        let mut i = info();
+        i["agent_errors"] = json!({"hassio.willow": "Mount failed: server 10.0.0.9 down"});
+        let l = parse_list("i", &i, &agents());
+        let c = check(&l, &config(&["hassio.willow"]), 48, now());
+        let out = plugin_toolkit::serde_json::to_string(&c).unwrap();
+        for leaked in [
+            "\"Automatic\"",
+            "\"Old\"",
+            "Mount failed",
+            "10.0.0.9",
+            "2026.10.1",
+        ] {
+            assert!(!out.contains(leaked), "{leaked} in {out}");
+        }
+    }
+
+    #[test]
+    fn unrelated_message_flood_is_capped() {
+        let mut replies = vec![
+            json!({"t": "open", "session": 1}),
+            text(json!({"type": "auth_required"})),
+            Value::Null,
+            text(json!({"type": "auth_ok"})),
+            Value::Null,
+        ];
+        replies.extend((0..=MAX_SKIPPED_MESSAGES).map(|_| text(json!({"type": "event"}))));
+        replies.push(Value::Null);
+        let (s, _) = sink(replies);
+        let err = with_cap_sink(s, || {
+            block_on(Client::new(Config::new("http://ha", "t")).backup_list("i"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("unrelated messages"), "{err}");
+    }
+
+    #[test]
+    fn total_deadline_bails() {
+        let (s, _) = sink(vec![
+            json!({"t": "open", "session": 1}),
+            text(json!({"type": "auth_required"})),
+            Value::Null,
+            text(json!({"type": "auth_ok"})),
+            Value::Null,
+            Value::Null,
+        ]);
+        let err = with_cap_sink(s, || {
+            block_on(
+                Client::new(Config::new("http://ha", "t"))
+                    .ws_commands_within(&["backup/info"], Duration::ZERO),
+            )
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("no reply within"), "{err}");
     }
 }

@@ -119,8 +119,9 @@ pub struct HaBackupsArgs {
 }
 
 /// List Home Assistant's native backups with each copy's agent, size, and protection.
-#[orca_tool(domain = "home-assistant", verb = "backups")]
-async fn ha_backups(args: HaBackupsArgs, _ctx: &ToolCtx) -> Result<crate::backups::HaBackupList> {
+#[orca_tool(domain = "home-assistant", verb = "backups", role = "admin")]
+async fn ha_backups(args: HaBackupsArgs, ctx: &ToolCtx) -> Result<crate::backups::HaBackupList> {
+    crate::authz::require_admin(ctx)?;
     make_client(&args.endpoint)?
         .backup_list(&args.endpoint)
         .await
@@ -148,7 +149,45 @@ async fn ha_backup_check(
     args: HaBackupCheckArgs,
     _ctx: &ToolCtx,
 ) -> Result<crate::backups::HaBackupCheck> {
+    crate::backups::validate_max_age_hours(args.max_age_hours)?;
     make_client(&args.endpoint)?
         .backup_check(&args.endpoint, args.max_age_hours)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authz::testing::{assert_refused, ctx};
+
+    #[tokio::test]
+    async fn backups_list_requires_admin() {
+        for role in [Some("user"), Some("viewer"), None] {
+            let args = HaBackupsArgs {
+                endpoint: "ha".into(),
+            };
+            assert_refused(&ha_backups(args, &ctx(role)).await.unwrap_err());
+        }
+        let args = HaBackupsArgs {
+            endpoint: "ha".into(),
+        };
+        let err = ha_backups(args, &ctx(Some("admin"))).await.unwrap_err();
+        assert!(!err.to_string().contains("admin role required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn backup_check_is_not_admin_gated_and_validates_max_age() {
+        let args = HaBackupCheckArgs {
+            endpoint: "ha".into(),
+            max_age_hours: 48,
+        };
+        let err = ha_backup_check(args, &ctx(Some("user"))).await.unwrap_err();
+        assert!(!err.to_string().contains("admin role required"), "{err}");
+        let args = HaBackupCheckArgs {
+            endpoint: "ha".into(),
+            max_age_hours: 0,
+        };
+        let err = ha_backup_check(args, &ctx(Some("user"))).await.unwrap_err();
+        assert!(err.to_string().contains("max_age_hours"), "{err}");
+    }
 }
