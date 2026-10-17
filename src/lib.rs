@@ -20,10 +20,33 @@ use plugin_toolkit::http::{Client as HttpClient, HttpError};
 use plugin_toolkit::serde_json::{Map, Value};
 use plugin_toolkit::url;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub base_url: String,
     pub token: String,
+}
+
+impl ::std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.debug_struct("Config")
+            .field("base_url", &self.base_url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+pub const CLEARTEXT_WARNING: &str = "endpoint uses http://; the access token travels in cleartext";
+
+pub fn check_base_url(base_url: &str) -> Result<(), String> {
+    let rest = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"));
+    match rest {
+        Some(host) if !host.is_empty() && !host.starts_with('/') => Ok(()),
+        _ => Err(format!(
+            "base_url '{base_url}' must be an http:// or https:// URL"
+        )),
+    }
 }
 
 impl Config {
@@ -181,6 +204,18 @@ impl Client {
             .unwrap_or_else(|_| Value::String(resp.text())))
     }
 
+    pub fn is_cleartext(&self) -> bool {
+        self.cfg.base_url.starts_with("http://")
+    }
+
+    pub fn warnings(&self) -> Vec<String> {
+        if self.is_cleartext() {
+            vec![CLEARTEXT_WARNING.to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.cfg.base_url.trim_end_matches('/'), path)
     }
@@ -306,5 +341,39 @@ mod tests {
             c.service_call(&call).await.unwrap_err(),
             HaError::MissingService
         ));
+    }
+
+    #[test]
+    fn config_debug_redacts_token() {
+        let d = format!("{:?}", Config::new("https://ha", "s3cret-token"));
+        assert!(!d.contains("s3cret-token"), "{d}");
+        assert!(d.contains("https://ha"));
+    }
+
+    #[test]
+    fn base_url_must_be_http_or_https() {
+        for ok in ["http://ha:8123", "https://ha.example"] {
+            assert!(check_base_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "ftp://ha",
+            "ha:8123",
+            "file:///etc/passwd",
+            "https://",
+            "ws://ha",
+        ] {
+            assert!(check_base_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn cleartext_endpoint_warns() {
+        assert_eq!(
+            Client::new(Config::new("http://ha", "t")).warnings(),
+            [CLEARTEXT_WARNING]
+        );
+        assert!(Client::new(Config::new("https://ha", "t"))
+            .warnings()
+            .is_empty());
     }
 }

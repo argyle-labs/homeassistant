@@ -524,7 +524,9 @@ impl Client {
         let r = self
             .ws_commands(&["backup/info", "backup/agents/info"])
             .await?;
-        Ok(parse_list(instance, &r[0], &r[1]))
+        let mut list = parse_list(instance, &r[0], &r[1]);
+        list.warnings = self.warnings();
+        Ok(list)
     }
 
     pub async fn backup_check(&self, instance: &str, max_age_hours: i64) -> Result<HaBackupCheck> {
@@ -533,12 +535,14 @@ impl Client {
             .ws_commands(&["backup/info", "backup/agents/info", "backup/config/info"])
             .await?;
         let list = parse_list(instance, &r[0], &r[1]);
-        Ok(check(
+        let mut out = check(
             &list,
             &r[2],
             max_age_hours,
             plugin_toolkit::time::now().unix_millis(),
-        ))
+        );
+        out.warnings = self.warnings();
+        Ok(out)
     }
 }
 

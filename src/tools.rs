@@ -40,6 +40,7 @@ pub(crate) fn make_client(name: &str) -> Result<Client> {
     if !row.enabled {
         bail!("home assistant endpoint '{name}' is disabled");
     }
+    crate::check_base_url(&row.base_url).map_err(|e| anyhow!(e))?;
     Ok(Client::new(Config::new(row.base_url, row.token)))
 }
 
