@@ -35,7 +35,7 @@ path = "src/main.rs"
 # Pinned to the orca rc tag that carries the plugin-toolkit surface. Until that
 # rc is cut, the committed `[patch]` in `.cargo/config.toml` resolves this to the
 # local in-tree toolkit at ../orca.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit" }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", features = ["delegated-ws"] }
 
 [dev-dependencies]
 # Dev-only: serde_json's `json!` for mock bodies reaches through the toolkit,
