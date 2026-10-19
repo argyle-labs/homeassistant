@@ -35,12 +35,11 @@ path = "src/main.rs"
 # Pinned to the orca rc tag that carries the plugin-toolkit surface. Until that
 # rc is cut, the committed `[patch]` in `.cargo/config.toml` resolves this to the
 # local in-tree toolkit at ../orca.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", features = ["delegated-ws"] }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http", "delegated-ws"] }
 
 [dev-dependencies]
 # Dev-only: serde_json's `json!` for mock bodies reaches through the toolkit,
 # same as the lib's in-crate tests. Not a runtime dep.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit" }
 tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 tempfile = "3"
@@ -50,3 +49,10 @@ tempfile = "3"
 # too — the plugin must stay portable back into the orca workspace.
 [lints.clippy]
 let_underscore_must_use = "deny"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
