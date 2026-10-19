@@ -29,7 +29,7 @@ pub struct Config {
 impl ::std::fmt::Debug for Config {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         f.debug_struct("Config")
-            .field("base_url", &self.base_url)
+            .field("base_url", &origin(&self.base_url))
             .field("token", &"<redacted>")
             .finish()
     }
@@ -38,14 +38,28 @@ impl ::std::fmt::Debug for Config {
 pub const CLEARTEXT_WARNING: &str = "endpoint uses http://; the access token travels in cleartext";
 
 pub fn check_base_url(base_url: &str) -> Result<(), String> {
-    let rest = base_url
-        .strip_prefix("https://")
-        .or_else(|| base_url.strip_prefix("http://"));
-    match rest {
-        Some(host) if !host.is_empty() && !host.starts_with('/') => Ok(()),
-        _ => Err(format!(
-            "base_url '{base_url}' must be an http:// or https:// URL"
-        )),
+    let u = plugin_toolkit::reqwest::Url::parse(base_url)
+        .map_err(|_| "base_url is not a valid URL".to_string())?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err("base_url must use http:// or https://".to_string());
+    }
+    if u.host_str().is_none_or(str::is_empty) {
+        return Err("base_url must name a host".to_string());
+    }
+    if !u.username().is_empty() || u.password().is_some() || base_url.contains('@') {
+        return Err("base_url must not carry credentials".to_string());
+    }
+    Ok(())
+}
+
+fn origin(base_url: &str) -> String {
+    match plugin_toolkit::reqwest::Url::parse(base_url) {
+        Ok(u) => match (u.host_str(), u.port()) {
+            (Some(h), Some(p)) => format!("{}://{h}:{p}", u.scheme()),
+            (Some(h), None) => format!("{}://{h}", u.scheme()),
+            _ => "<invalid>".to_string(),
+        },
+        Err(_) => "<invalid>".to_string(),
     }
 }
 
@@ -344,6 +358,20 @@ mod tests {
     }
 
     #[test]
+    fn base_url_errors_do_not_echo_the_url() {
+        let err = check_base_url("http://user:hunter2@ha").unwrap_err();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(!err.contains("user"), "{err}");
+    }
+
+    #[test]
+    fn config_debug_shows_only_origin() {
+        let d = format!("{:?}", Config::new("https://ha:8123/x?token=q", "t"));
+        assert!(d.contains("https://ha:8123"), "{d}");
+        assert!(!d.contains("token=q"), "{d}");
+    }
+
+    #[test]
     fn config_debug_redacts_token() {
         let d = format!("{:?}", Config::new("https://ha", "s3cret-token"));
         assert!(!d.contains("s3cret-token"), "{d}");
@@ -356,6 +384,8 @@ mod tests {
             assert!(check_base_url(ok).is_ok(), "{ok}");
         }
         for bad in [
+            "http://user:pass@ha",
+            "http://@evil",
             "ftp://ha",
             "ha:8123",
             "file:///etc/passwd",

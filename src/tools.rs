@@ -145,6 +145,8 @@ fn default_max_age_hours() -> i64 {
 
 /// Grade Home Assistant's native backups for freshness and off-box coverage.
 /// Integrity is not verified: Home Assistant exposes no backup checksum.
+/// Returns agent ids (operational mount names, scrubbed) but no backup names
+/// or error text, so read-role callers see no free-form upstream content.
 #[orca_tool(domain = "home-assistant", verb = "backup-check")]
 async fn ha_backup_check(
     args: HaBackupCheckArgs,

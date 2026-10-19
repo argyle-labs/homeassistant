@@ -1,13 +1,13 @@
 #![allow(clippy::disallowed_types)]
 
-use plugin_toolkit::abi::WsOpen;
+use plugin_toolkit::abi::{WsChunk, WsOpen};
 use plugin_toolkit::contract::backup::BackupRecord;
 use plugin_toolkit::delegated_ws::WsClient;
 use plugin_toolkit::prelude::*;
 use plugin_toolkit::serde_json::{json, Value};
-use plugin_toolkit::time::{Deadline, Timestamp};
+use plugin_toolkit::time::Timestamp;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::Client;
 
@@ -31,8 +31,15 @@ pub fn upstream_text(v: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     };
-    let scrubbed = plugin_toolkit::scrub::scrub_line(&raw).into_owned();
+    let clean: String = raw.chars().filter(|c| !is_hidden_char(*c)).collect();
+    let scrubbed = plugin_toolkit::scrub::scrub_line(&clean).into_owned();
     scrubbed.chars().take(MAX_UPSTREAM_TEXT).collect()
+}
+
+fn is_hidden_char(c: char) -> bool {
+    c.is_control()
+        || ('\u{202A}'..='\u{202E}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
 }
 
 pub fn is_off_box(agent_id: &str) -> bool {
@@ -49,11 +56,19 @@ fn ws_url(base_url: &str) -> String {
     format!("{rest}/api/websocket")
 }
 
-async fn recv_json(ws: &WsClient) -> Result<Value> {
-    let text = ws
-        .recv()
-        .await?
+async fn recv_json(ws: &WsClient, deadline: Instant) -> Result<Value> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!("home assistant did not reply before the deadline");
+    }
+    let chunk = plugin_toolkit::time::timeout(remaining, ws.recv_timeout(remaining))
+        .await
+        .context("home assistant did not reply before the deadline")?
+        .context("home assistant did not reply before the deadline")?
         .context("home assistant closed the websocket")?;
+    let WsChunk::Text { text } = chunk else {
+        bail!("home assistant sent a non-text websocket message");
+    };
     Ok(plugin_toolkit::serde_json::from_str(&text)?)
 }
 
@@ -63,7 +78,7 @@ impl Client {
     }
 
     async fn ws_commands_within(&self, types: &[&str], budget: Duration) -> Result<Vec<Value>> {
-        let deadline = Deadline::after(budget);
+        let deadline = Instant::now() + budget;
         let ws = WsClient::connect(WsOpen {
             url: ws_url(&self.cfg.base_url),
             headers: Vec::new(),
@@ -72,7 +87,7 @@ impl Client {
             max_message_bytes: Some(MAX_MESSAGE_BYTES),
         })
         .await?;
-        let hello = recv_json(&ws).await?;
+        let hello = recv_json(&ws, deadline).await?;
         if hello["type"] != "auth_required" {
             bail!(
                 "unexpected websocket greeting: {}",
@@ -81,7 +96,7 @@ impl Client {
         }
         ws.send(json!({"type": "auth", "access_token": self.cfg.token}).to_string())
             .await?;
-        let auth = recv_json(&ws).await?;
+        let auth = recv_json(&ws, deadline).await?;
         if auth["type"] != "auth_ok" {
             bail!(
                 "home assistant rejected the token ({})",
@@ -94,10 +109,7 @@ impl Client {
             ws.send(json!({"id": id, "type": ty}).to_string()).await?;
             let mut skipped = 0;
             let reply = loop {
-                if deadline.reached() {
-                    bail!("{ty}: no reply within {}s", budget.as_secs());
-                }
-                let msg = recv_json(&ws).await?;
+                let msg = recv_json(&ws, deadline).await?;
                 if msg["id"] == id && msg["type"] == "result" {
                     break msg;
                 }
@@ -218,11 +230,15 @@ pub struct AgentError {
 
 fn error_class(v: &Value) -> String {
     let text = upstream_text(v);
-    let head = text.split([':', '(', '\n']).next().unwrap_or("").trim();
-    if head.is_empty() {
-        "error".to_string()
-    } else {
+    let head = text.split([':', '(']).next().unwrap_or("").trim();
+    let mut chars = head.chars();
+    let valid = head.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if valid {
         head.to_string()
+    } else {
+        "error".to_string()
     }
 }
 
@@ -580,6 +596,7 @@ mod tests {
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .unwrap()
             .block_on(f)
@@ -881,6 +898,67 @@ mod tests {
             )
         })
         .unwrap_err();
-        assert!(err.to_string().contains("no reply within"), "{err}");
+        assert!(err.to_string().contains("deadline"), "{err}");
+    }
+
+    #[test]
+    fn error_class_rejects_paths_and_free_text() {
+        assert_eq!(
+            error_class(&json!("Mount 10.0.0.9:/mnt/user/backups/ha is down")),
+            "error"
+        );
+        assert_eq!(
+            error_class(&json!("could not reach //nas/share/ha")),
+            "error"
+        );
+        assert_eq!(
+            error_class(&json!("BackupAgentError: boom")),
+            "BackupAgentError"
+        );
+        assert_eq!(error_class(&json!("1abc: x")), "error");
+    }
+
+    #[test]
+    fn upstream_text_strips_control_and_bidi_chars() {
+        let t = upstream_text(&json!("ok\u{202E}gnp.exe\u{2066}\n\u{1b}[31mred"));
+        assert_eq!(t, "okgnp.exe[31mred");
+    }
+
+    #[test]
+    fn silent_server_times_out_at_the_deadline() {
+        let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&calls);
+        let mut replies: VecDeque<Value> = vec![
+            json!({"t": "open", "session": 1}),
+            text(json!({"type": "auth_required"})),
+        ]
+        .into();
+        let s: CapSink = Box::new(move |cap: &str, op: &str| {
+            seen.borrow_mut().push((
+                cap.to_string(),
+                plugin_toolkit::serde_json::from_str(op).unwrap(),
+            ));
+            if cap == "ws.recv" && replies.is_empty() {
+                return Err("timed out".to_string());
+            }
+            Ok(replies.pop_front().unwrap_or(Value::Null).to_string())
+        });
+        let budget = Duration::from_millis(1500);
+        let err = with_cap_sink(s, || {
+            block_on(
+                Client::new(Config::new("http://ha", "t"))
+                    .ws_commands_within(&["backup/info"], budget),
+            )
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("deadline"), "{err}");
+        let calls = calls.borrow();
+        let waits: Vec<u64> = calls
+            .iter()
+            .filter(|(c, _)| c == "ws.recv")
+            .map(|(_, op)| op["timeout_ms"].as_u64().expect("bounded recv"))
+            .collect();
+        assert_eq!(waits.len(), 2);
+        assert!(waits.iter().all(|w| *w <= 1500), "{waits:?}");
     }
 }
