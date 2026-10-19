@@ -40,6 +40,7 @@ pub(crate) fn make_client(name: &str) -> Result<Client> {
     if !row.enabled {
         bail!("home assistant endpoint '{name}' is disabled");
     }
+    crate::check_base_url(&row.base_url).map_err(|e| anyhow!(e))?;
     Ok(Client::new(Config::new(row.base_url, row.token)))
 }
 
@@ -109,4 +110,87 @@ async fn ha_service(
         data: service_data.unwrap_or_default(),
     };
     Ok(client.service_call(&call).await?.into())
+}
+
+#[orca_struct(args)]
+pub struct HaBackupsArgs {
+    /// Registered endpoint name.
+    #[arg(long)]
+    pub endpoint: String,
+}
+
+/// List Home Assistant's native backups with each copy's agent, size, and protection.
+#[orca_tool(domain = "home-assistant", verb = "backups", role = "admin")]
+async fn ha_backups(args: HaBackupsArgs, ctx: &ToolCtx) -> Result<crate::backups::HaBackupList> {
+    crate::authz::require_admin(ctx)?;
+    make_client(&args.endpoint)?
+        .backup_list(&args.endpoint)
+        .await
+}
+
+#[orca_struct(args)]
+pub struct HaBackupCheckArgs {
+    /// Registered endpoint name.
+    #[arg(long)]
+    pub endpoint: String,
+    /// Hours after which the newest backup counts as stale.
+    #[arg(long, default_value_t = 48)]
+    #[serde(default = "default_max_age_hours")]
+    pub max_age_hours: i64,
+}
+
+fn default_max_age_hours() -> i64 {
+    48
+}
+
+/// Grade Home Assistant's native backups for freshness and off-box coverage.
+/// Integrity is not verified: Home Assistant exposes no backup checksum.
+/// Returns agent ids (operational mount names, scrubbed) but no backup names
+/// or error text, so read-role callers see no free-form upstream content.
+#[orca_tool(domain = "home-assistant", verb = "backup-check")]
+async fn ha_backup_check(
+    args: HaBackupCheckArgs,
+    _ctx: &ToolCtx,
+) -> Result<crate::backups::HaBackupCheck> {
+    crate::backups::validate_max_age_hours(args.max_age_hours)?;
+    make_client(&args.endpoint)?
+        .backup_check(&args.endpoint, args.max_age_hours)
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authz::testing::{assert_refused, ctx};
+
+    #[tokio::test]
+    async fn backups_list_requires_admin() {
+        for role in [Some("user"), Some("viewer"), None] {
+            let args = HaBackupsArgs {
+                endpoint: "ha".into(),
+            };
+            assert_refused(&ha_backups(args, &ctx(role)).await.unwrap_err());
+        }
+        let args = HaBackupsArgs {
+            endpoint: "ha".into(),
+        };
+        let err = ha_backups(args, &ctx(Some("admin"))).await.unwrap_err();
+        assert!(!err.to_string().contains("admin role required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn backup_check_is_not_admin_gated_and_validates_max_age() {
+        let args = HaBackupCheckArgs {
+            endpoint: "ha".into(),
+            max_age_hours: 48,
+        };
+        let err = ha_backup_check(args, &ctx(Some("user"))).await.unwrap_err();
+        assert!(!err.to_string().contains("admin role required"), "{err}");
+        let args = HaBackupCheckArgs {
+            endpoint: "ha".into(),
+            max_age_hours: 0,
+        };
+        let err = ha_backup_check(args, &ctx(Some("user"))).await.unwrap_err();
+        assert!(err.to_string().contains("max_age_hours"), "{err}");
+    }
 }
