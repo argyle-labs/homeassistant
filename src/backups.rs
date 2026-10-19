@@ -26,20 +26,47 @@ const MAX_UPSTREAM_TEXT: usize = 64;
 const FUTURE_SKEW_MS: i64 = 5 * 60_000;
 
 pub fn upstream_text(v: &Value) -> String {
-    let raw = match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    };
-    let clean: String = raw.chars().filter(|c| !is_hidden_char(*c)).collect();
+    let raw = raw_text(v);
+    let clean: String = strip_ansi(&raw)
+        .chars()
+        .filter(|c| !is_hidden_char(*c))
+        .collect();
     let scrubbed = plugin_toolkit::scrub::scrub_line(&clean).into_owned();
     scrubbed.chars().take(MAX_UPSTREAM_TEXT).collect()
 }
 
 fn is_hidden_char(c: char) -> bool {
     c.is_control()
+        || ('\u{200B}'..='\u{200F}').contains(&c)
         || ('\u{202A}'..='\u{202E}').contains(&c)
         || ('\u{2066}'..='\u{2069}').contains(&c)
+        || matches!(c, '\u{061C}' | '\u{FEFF}' | '\u{2028}' | '\u{2029}')
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for f in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&f) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn raw_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 pub fn is_off_box(agent_id: &str) -> bool {
@@ -58,12 +85,12 @@ fn ws_url(base_url: &str) -> String {
 
 async fn recv_json(ws: &WsClient, deadline: Instant) -> Result<Value> {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
+    if remaining < Duration::from_millis(1) {
         bail!("home assistant did not reply before the deadline");
     }
-    let chunk = plugin_toolkit::time::timeout(remaining, ws.recv_timeout(remaining))
+    let chunk = ws
+        .recv_timeout(remaining)
         .await
-        .context("home assistant did not reply before the deadline")?
         .context("home assistant did not reply before the deadline")?
         .context("home assistant closed the websocket")?;
     let WsChunk::Text { text } = chunk else {
@@ -229,8 +256,13 @@ pub struct AgentError {
 }
 
 fn error_class(v: &Value) -> String {
-    let text = upstream_text(v);
-    let head = text.split([':', '(']).next().unwrap_or("").trim();
+    let raw = raw_text(v);
+    let first = raw.split(['\n', ':', '(']).next().unwrap_or("");
+    if first.trim().chars().count() > 64 {
+        return "error".to_string();
+    }
+    let head = upstream_text(&Value::String(first.to_string()));
+    let head = head.trim();
     let mut chars = head.chars();
     let valid = head.len() <= 64
         && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
@@ -265,7 +297,7 @@ fn parse_backup(instance: &str, b: &Value) -> Option<HaBackup> {
         .map(|m| {
             m.iter()
                 .map(|(id, a)| BackupCopy {
-                    agent_id: id.clone(),
+                    agent_id: upstream_text(&Value::String(id.clone())),
                     protected: a["protected"].as_bool().unwrap_or(false),
                     size_bytes: a["size"].as_u64().unwrap_or(0),
                     off_box: is_off_box(id),
@@ -337,7 +369,12 @@ pub fn parse_list(instance: &str, info: &Value, agents: &Value) -> HaBackupList 
         .unwrap_or_default();
     let agents = agents["agents"]
         .as_array()
-        .map(|a| a.iter().filter_map(|x| str_opt(&x["agent_id"])).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| str_opt(&x["agent_id"]))
+                .map(|id| upstream_text(&Value::String(id)))
+                .collect()
+        })
         .unwrap_or_default();
     HaBackupList {
         backups,
@@ -921,7 +958,24 @@ mod tests {
     #[test]
     fn upstream_text_strips_control_and_bidi_chars() {
         let t = upstream_text(&json!("ok\u{202E}gnp.exe\u{2066}\n\u{1b}[31mred"));
-        assert_eq!(t, "okgnp.exe[31mred");
+        assert_eq!(t, "okgnp.exered");
+        let t = upstream_text(&json!("a\u{200B}b\u{061C}c\u{FEFF}d\u{2028}e\u{1b}[1;32mf"));
+        assert_eq!(t, "abcdef");
+    }
+
+    #[test]
+    fn error_class_limits_and_unicode() {
+        let ok = format!("A{}", "b".repeat(63));
+        assert_eq!(error_class(&json!(format!("{ok}: x"))), ok);
+        assert_eq!(
+            error_class(&json!(format!("A{}: x", "b".repeat(64)))),
+            "error"
+        );
+        assert_eq!(error_class(&json!("Fehlerä: x")), "error");
+        assert_eq!(
+            error_class(&json!("BackupError\nsecond: line")),
+            "BackupError"
+        );
     }
 
     #[test]

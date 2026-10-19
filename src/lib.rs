@@ -46,7 +46,13 @@ pub fn check_base_url(base_url: &str) -> Result<(), String> {
     if u.host_str().is_none_or(str::is_empty) {
         return Err("base_url must name a host".to_string());
     }
-    if !u.username().is_empty() || u.password().is_some() || base_url.contains('@') {
+    let authority = base_url
+        .split_once("://")
+        .map_or("", |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    if !u.username().is_empty() || u.password().is_some() || authority.contains('@') {
         return Err("base_url must not carry credentials".to_string());
     }
     Ok(())
@@ -372,6 +378,13 @@ mod tests {
     }
 
     #[test]
+    fn config_debug_drops_userinfo() {
+        let d = format!("{:?}", Config::new("https://user:pw@ha:8123", "t"));
+        assert!(!d.contains("user") && !d.contains("pw@"), "{d}");
+        assert!(d.contains("https://ha:8123"), "{d}");
+    }
+
+    #[test]
     fn config_debug_redacts_token() {
         let d = format!("{:?}", Config::new("https://ha", "s3cret-token"));
         assert!(!d.contains("s3cret-token"), "{d}");
@@ -380,7 +393,11 @@ mod tests {
 
     #[test]
     fn base_url_must_be_http_or_https() {
-        for ok in ["http://ha:8123", "https://ha.example"] {
+        for ok in [
+            "http://ha:8123",
+            "https://ha.example",
+            "https://ha.example/path@x?q=a@b",
+        ] {
             assert!(check_base_url(ok).is_ok(), "{ok}");
         }
         for bad in [
