@@ -142,10 +142,9 @@ impl Client {
         let mut out = Vec::with_capacity(msgs.len());
         for (i, msg) in msgs.iter().enumerate() {
             let id = i as u64 + 1;
-            let mut req = json!({"id": id});
-            if let (Some(r), Some(m)) = (req.as_object_mut(), msg.as_object()) {
-                r.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
+            let mut req = msg.as_object().cloned().unwrap_or_default();
+            req.insert("id".into(), json!(id));
+            let req = Value::Object(req);
             let ty = match msg["endpoint"].as_str() {
                 Some(ep) => format!("{} {ep}", raw_text(&msg["type"])),
                 None => raw_text(&msg["type"]),

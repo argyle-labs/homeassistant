@@ -367,8 +367,9 @@ impl Client {
             });
         }
         let mut msgs = Vec::new();
+        let mut password = None;
         if !change.is_empty() {
-            let password = change
+            password = change
                 .password_secret
                 .as_deref()
                 .map(&resolve)
@@ -376,13 +377,19 @@ impl Client {
             msgs.push(supervisor(
                 &format!("/mounts/{name}"),
                 "put",
-                Some(update_body(&raw, change, password)?),
+                Some(update_body(&raw, change, password.clone())?),
             ));
         }
         msgs.push(supervisor(&format!("/mounts/{name}/reload"), "post", None));
         msgs.push(supervisor("/mounts", "get", None));
         msgs.push(supervisor("/resolution/info", "get", None));
-        let r = self.ws_requests(&msgs).await?;
+        let r = self.ws_requests(&msgs).await.map_err(|e| {
+            let text = format!("{e:#}");
+            match password.as_deref().filter(|p| !p.is_empty()) {
+                Some(p) => anyhow!(text.replace(p, "<redacted>")),
+                None => anyhow!(text),
+            }
+        })?;
         let after = parse_mounts(&r[r.len() - 2], &r[r.len() - 1])
             .mounts
             .into_iter()
@@ -647,6 +654,33 @@ mod tests {
                 "read_only": true, "version": "auto", "username": "ha", "password": "n3w-pass"
             })
         );
+    }
+
+    #[test]
+    fn cifs_update_error_never_echoes_password() {
+        let mut replies = session(vec![mounts(), resolution()]);
+        replies.extend(vec![
+            json!({"t": "open", "session": 1}),
+            frame(json!({"type": "auth_required"})),
+            Value::Null,
+            frame(json!({"type": "auth_ok"})),
+            Value::Null,
+            frame(json!({"id": 1, "type": "result", "success": false,
+                "error": {"message": "invalid password n3w-pass for mount"}})),
+            Value::Null,
+        ]);
+        let (s, _) = sink(replies);
+        let change = MountChange {
+            password_secret: Some("homeassistant.willow.smb".into()),
+            ..Default::default()
+        };
+        let err = with_cap_sink(s, || {
+            block_on(
+                client().mount_repair("willow_media", &change, true, |_| Ok("n3w-pass".into())),
+            )
+        })
+        .unwrap_err();
+        assert!(!format!("{err:#}").contains("n3w-pass"), "{err:#}");
     }
 
     #[test]
