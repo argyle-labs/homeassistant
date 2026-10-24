@@ -31,11 +31,7 @@ path = "src/main.rs"
 # `http` transport) — is reached through `plugin_toolkit::*` / its prelude or
 # injected by the `#[orca_tool]`/`endpoint_resource!` macros. The plugin source
 # names no external crate.
-#
-# Pinned to the orca rc tag that carries the plugin-toolkit surface. Until that
-# rc is cut, the committed `[patch]` in `.cargo/config.toml` resolves this to the
-# local in-tree toolkit at ../orca.
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http", "delegated-ws"] }
+plugin-toolkit = { version = "=0.2.1-rc.39", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http", "delegated-ws"] }
 
 [dev-dependencies]
 # Dev-only: serde_json's `json!` for mock bodies reaches through the toolkit,
