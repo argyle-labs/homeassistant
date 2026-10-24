@@ -105,6 +105,15 @@ impl Client {
     }
 
     async fn ws_commands_within(&self, types: &[&str], budget: Duration) -> Result<Vec<Value>> {
+        let msgs: Vec<Value> = types.iter().map(|ty| json!({"type": ty})).collect();
+        self.ws_requests_within(&msgs, budget).await
+    }
+
+    pub async fn ws_requests(&self, msgs: &[Value]) -> Result<Vec<Value>> {
+        self.ws_requests_within(msgs, WS_BUDGET).await
+    }
+
+    async fn ws_requests_within(&self, msgs: &[Value], budget: Duration) -> Result<Vec<Value>> {
         let deadline = Instant::now() + budget;
         let ws = WsClient::connect(WsOpen {
             url: ws_url(&self.cfg.base_url),
@@ -130,10 +139,18 @@ impl Client {
                 upstream_text(&auth["type"])
             );
         }
-        let mut out = Vec::with_capacity(types.len());
-        for (i, ty) in types.iter().enumerate() {
+        let mut out = Vec::with_capacity(msgs.len());
+        for (i, msg) in msgs.iter().enumerate() {
             let id = i as u64 + 1;
-            ws.send(json!({"id": id, "type": ty}).to_string()).await?;
+            let mut req = json!({"id": id});
+            if let (Some(r), Some(m)) = (req.as_object_mut(), msg.as_object()) {
+                r.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            let ty = match msg["endpoint"].as_str() {
+                Some(ep) => format!("{} {ep}", raw_text(&msg["type"])),
+                None => raw_text(&msg["type"]),
+            };
+            ws.send(req.to_string()).await?;
             let mut skipped = 0;
             let reply = loop {
                 let msg = recv_json(&ws, deadline).await?;
@@ -563,6 +580,117 @@ pub fn check(
     }
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum AutomaticResult {
+    Never,
+    Succeeded,
+    Partial,
+    Failed,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct FailedUpload {
+    pub backup_id: String,
+    pub date: String,
+    pub automatic: bool,
+    pub failed_agent_ids: Vec<String>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct HaBackupStatus {
+    pub agents: Vec<String>,
+    pub enrolled_agent_ids: Vec<String>,
+    pub last_attempted_automatic_backup: Option<String>,
+    pub last_completed_automatic_backup: Option<String>,
+    pub last_automatic_result: AutomaticResult,
+    pub failed_uploads: Vec<FailedUpload>,
+    pub agent_errors: Vec<AgentError>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+pub fn status(list: &HaBackupList, config: &Value) -> HaBackupStatus {
+    let attempted = list
+        .last_attempted_automatic_backup
+        .as_deref()
+        .and_then(parse_ms);
+    let completed = list
+        .last_completed_automatic_backup
+        .as_deref()
+        .and_then(parse_ms);
+    let newest_auto_failed = list
+        .backups
+        .iter()
+        .find(|b| b.automatic)
+        .is_some_and(|b| !b.failed_agent_ids.is_empty());
+    let last_automatic_result = match (attempted, completed) {
+        (None, None) => AutomaticResult::Never,
+        (Some(a), c) if c.is_none_or(|c| c < a) => AutomaticResult::Failed,
+        _ if newest_auto_failed => AutomaticResult::Partial,
+        _ => AutomaticResult::Succeeded,
+    };
+    let failed_uploads = list
+        .backups
+        .iter()
+        .filter(|b| !b.failed_agent_ids.is_empty())
+        .map(|b| FailedUpload {
+            backup_id: upstream_text(&Value::String(b.backup_id.clone())),
+            date: b.date.clone(),
+            automatic: b.automatic,
+            failed_agent_ids: b
+                .failed_agent_ids
+                .iter()
+                .map(|a| upstream_text(&Value::String(a.clone())))
+                .collect(),
+        })
+        .collect();
+    HaBackupStatus {
+        agents: list.agents.clone(),
+        enrolled_agent_ids: str_list(&config["config"]["create_backup"]["agent_ids"])
+            .iter()
+            .map(|a| upstream_text(&Value::String(a.clone())))
+            .collect(),
+        last_attempted_automatic_backup: list.last_attempted_automatic_backup.clone(),
+        last_completed_automatic_backup: list.last_completed_automatic_backup.clone(),
+        last_automatic_result,
+        failed_uploads,
+        agent_errors: list.agent_errors.clone(),
+        warnings: Vec::new(),
+    }
+}
+
 pub const MAX_AGE_HOURS_RANGE: std::ops::RangeInclusive<i64> = 1..=8760;
 
 pub fn validate_max_age_hours(h: i64) -> Result<()> {
@@ -580,6 +708,15 @@ impl Client {
         let mut list = parse_list(instance, &r[0], &r[1]);
         list.warnings = self.warnings();
         Ok(list)
+    }
+
+    pub async fn backup_status(&self, instance: &str) -> Result<HaBackupStatus> {
+        let r = self
+            .ws_commands(&["backup/info", "backup/agents/info", "backup/config/info"])
+            .await?;
+        let mut out = status(&parse_list(instance, &r[0], &r[1]), &r[2]);
+        out.warnings = self.warnings();
+        Ok(out)
     }
 
     pub async fn backup_check(&self, instance: &str, max_age_hours: i64) -> Result<HaBackupCheck> {
@@ -794,6 +931,44 @@ mod tests {
         assert_eq!(sent[1], json!({"id": 1, "type": "backup/info"}));
         assert_eq!(sent[2], json!({"id": 2, "type": "backup/agents/info"}));
         assert_eq!(calls.last().unwrap().0, "ws.close");
+    }
+
+    #[test]
+    fn status_reports_failed_uploads_and_result() {
+        let mut i = info();
+        i["backups"][1]["failed_agent_ids"] = json!(["hassio.maple"]);
+        let s = status(
+            &parse_list("i", &i, &agents()),
+            &config(&["hassio.local", "hassio.maple"]),
+        );
+        assert_eq!(s.last_automatic_result, AutomaticResult::Partial);
+        assert_eq!(s.failed_uploads.len(), 1);
+        assert_eq!(s.failed_uploads[0].backup_id, "new1");
+        assert_eq!(s.failed_uploads[0].failed_agent_ids, ["hassio.maple"]);
+        assert!(s.failed_uploads[0].automatic);
+        assert_eq!(s.enrolled_agent_ids, ["hassio.local", "hassio.maple"]);
+        let out = plugin_toolkit::serde_json::to_string(&s).unwrap();
+        assert!(!out.contains("hunter2"));
+    }
+
+    #[test]
+    fn status_automatic_result_states() {
+        let mut i = info();
+        assert_eq!(
+            status(&parse_list("i", &i, &agents()), &config(&[])).last_automatic_result,
+            AutomaticResult::Succeeded
+        );
+        i["last_completed_automatic_backup"] = json!("2026-10-01T04:00:00+00:00");
+        assert_eq!(
+            status(&parse_list("i", &i, &agents()), &config(&[])).last_automatic_result,
+            AutomaticResult::Failed
+        );
+        i["last_attempted_automatic_backup"] = Value::Null;
+        i["last_completed_automatic_backup"] = Value::Null;
+        assert_eq!(
+            status(&parse_list("i", &i, &agents()), &config(&[])).last_automatic_result,
+            AutomaticResult::Never
+        );
     }
 
     #[test]

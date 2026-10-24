@@ -158,6 +158,93 @@ async fn ha_backup_check(
         .await
 }
 
+#[orca_struct(args)]
+pub struct HaEndpointArgs {
+    /// Registered endpoint name.
+    #[arg(long)]
+    pub endpoint: String,
+}
+
+/// List Home Assistant backup agents and locations, the last automatic backup result, and failed uploads.
+#[orca_tool(domain = "home-assistant", verb = "backup-status", role = "read")]
+async fn ha_backup_status(
+    args: HaEndpointArgs,
+    _ctx: &ToolCtx,
+) -> Result<crate::backups::HaBackupStatus> {
+    make_client(&args.endpoint)?
+        .backup_status(&args.endpoint)
+        .await
+}
+
+/// List Supervisor network storage mounts with usage, state, and failure issues. Never returns passwords.
+#[orca_tool(domain = "home-assistant", verb = "mount-list", role = "read")]
+async fn ha_mount_list(
+    args: HaEndpointArgs,
+    _ctx: &ToolCtx,
+) -> Result<crate::supervisor::HaMountList> {
+    make_client(&args.endpoint)?.mount_list().await
+}
+
+/// List open Home Assistant repair issues.
+#[orca_tool(domain = "home-assistant", verb = "repairs-list", role = "read")]
+async fn ha_repairs_list(
+    args: HaEndpointArgs,
+    _ctx: &ToolCtx,
+) -> Result<crate::supervisor::HaRepairList> {
+    make_client(&args.endpoint)?.repairs_list().await
+}
+
+#[orca_struct(args)]
+pub struct HaMountRepairArgs {
+    /// Registered endpoint name.
+    #[arg(long)]
+    pub endpoint: String,
+    /// Supervisor mount name.
+    #[arg(long)]
+    pub mount: String,
+    /// New server host.
+    #[arg(long)]
+    #[serde(default)]
+    pub server: Option<String>,
+    /// New share (cifs) or export path (nfs).
+    #[arg(long)]
+    #[serde(default)]
+    pub share: Option<String>,
+    /// New cifs username.
+    #[arg(long)]
+    #[serde(default)]
+    pub username: Option<String>,
+    /// orca secret ref holding the cifs password; required for any cifs update.
+    #[arg(long)]
+    #[serde(default)]
+    pub password_secret: Option<String>,
+    /// Apply the change. Without it the tool only returns the plan.
+    #[arg(long)]
+    #[serde(default)]
+    pub execute: bool,
+}
+
+/// [SENSITIVE] [MUTATES STATE] Reload a Supervisor mount, optionally updating server, share, or credentials first.
+/// Returns the plan only unless `execute` is set.
+#[orca_tool(domain = "home-assistant", verb = "mount-repair", role = "admin")]
+async fn ha_mount_repair(
+    args: HaMountRepairArgs,
+    ctx: &ToolCtx,
+) -> Result<crate::supervisor::HaMountRepair> {
+    crate::authz::require_admin(ctx)?;
+    let change = crate::supervisor::MountChange {
+        server: args.server,
+        share: args.share,
+        username: args.username,
+        password_secret: args.password_secret,
+    };
+    make_client(&args.endpoint)?
+        .mount_repair(&args.mount, &change, args.execute, |name| {
+            plugin_toolkit::secrets::get_required(name)
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +262,26 @@ mod tests {
             endpoint: "ha".into(),
         };
         let err = ha_backups(args, &ctx(Some("admin"))).await.unwrap_err();
+        assert!(!err.to_string().contains("admin role required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn mount_repair_requires_admin() {
+        let args = || HaMountRepairArgs {
+            endpoint: "ha".into(),
+            mount: "maple_backups".into(),
+            server: None,
+            share: None,
+            username: None,
+            password_secret: None,
+            execute: false,
+        };
+        for role in [Some("user"), Some("viewer"), None] {
+            assert_refused(&ha_mount_repair(args(), &ctx(role)).await.unwrap_err());
+        }
+        let err = ha_mount_repair(args(), &ctx(Some("admin")))
+            .await
+            .unwrap_err();
         assert!(!err.to_string().contains("admin role required"), "{err}");
     }
 
