@@ -31,7 +31,7 @@ path = "src/main.rs"
 # `http` transport) — is reached through `plugin_toolkit::*` / its prelude or
 # injected by the `#[orca_tool]`/`endpoint_resource!` macros. The plugin source
 # names no external crate.
-plugin-toolkit = { version = "=0.2.1-rc.39", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http", "delegated-ws"] }
+plugin-toolkit = { version = "=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "http", "delegated-ws"] }
 
 [dev-dependencies]
 # Dev-only: serde_json's `json!` for mock bodies reaches through the toolkit,
