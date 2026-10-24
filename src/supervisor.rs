@@ -120,6 +120,45 @@ pub struct HaMountRepair {
     pub plan: Vec<String>,
     pub before: HaMount,
     pub after: Option<HaMount>,
+    pub applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct HaMountHealed {
+    pub mount: String,
+    pub before: HaMount,
+    pub after: Option<HaMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    plugin_toolkit::serde::Serialize,
+    plugin_toolkit::serde::Deserialize,
+    plugin_toolkit::schemars::JsonSchema,
+)]
+#[serde(crate = "plugin_toolkit::serde")]
+#[schemars(crate = "plugin_toolkit::schemars")]
+#[serde(rename_all = "camelCase")]
+pub struct HaMountHeal {
+    pub dry_run: bool,
+    pub plan: Vec<String>,
+    pub mounts: Vec<HaMountHealed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -278,6 +317,22 @@ fn update_body(raw: &Value, change: &MountChange, password: Option<String>) -> R
     Ok(Value::Object(body))
 }
 
+fn redact(e: &impl std::fmt::Display, secret: Option<&str>) -> String {
+    let text = format!("{e:#}");
+    match secret.filter(|p| !p.is_empty()) {
+        Some(p) => text.replace(p, "<redacted>"),
+        None => text,
+    }
+}
+
+fn needs_heal(m: &HaMount) -> bool {
+    m.failed || m.state.as_deref() != Some("active")
+}
+
+fn find_mount(list: HaMountList, name: &str) -> Option<HaMount> {
+    list.mounts.into_iter().find(|m| m.name == name)
+}
+
 fn find_raw<'a>(mounts: &'a Value, name: &str) -> Result<&'a Value> {
     mounts["mounts"]
         .as_array()
@@ -363,10 +418,12 @@ impl Client {
                 plan: steps,
                 before,
                 after: None,
+                applied: false,
+                reload_error: None,
                 warnings: self.warnings(),
             });
         }
-        let mut msgs = Vec::new();
+        let mut applied = false;
         let mut password = None;
         if !change.is_empty() {
             password = change
@@ -374,32 +431,99 @@ impl Client {
                 .as_deref()
                 .map(&resolve)
                 .transpose()?;
-            msgs.push(supervisor(
+            let put = supervisor(
                 &format!("/mounts/{name}"),
                 "put",
                 Some(update_body(&raw, change, password.clone())?),
-            ));
+            );
+            self.ws_requests(&[put])
+                .await
+                .map_err(|e| anyhow!(redact(&e, password.as_deref())))?;
+            applied = true;
         }
-        msgs.push(supervisor(&format!("/mounts/{name}/reload"), "post", None));
-        msgs.push(supervisor("/mounts", "get", None));
-        msgs.push(supervisor("/resolution/info", "get", None));
-        let r = self.ws_requests(&msgs).await.map_err(|e| {
-            let text = format!("{e:#}");
-            match password.as_deref().filter(|p| !p.is_empty()) {
-                Some(p) => anyhow!(text.replace(p, "<redacted>")),
-                None => anyhow!(text),
+        let msgs = [
+            supervisor(&format!("/mounts/{name}/reload"), "post", None),
+            supervisor("/mounts", "get", None),
+            supervisor("/resolution/info", "get", None),
+        ];
+        let (after, reload_error) = match self.ws_requests(&msgs).await {
+            Ok(r) => (find_mount(parse_mounts(&r[1], &r[2]), name), None),
+            Err(e) if applied => {
+                let after = self
+                    .mounts_raw()
+                    .await
+                    .ok()
+                    .and_then(|(m, r)| find_mount(parse_mounts(&m, &r), name));
+                (after, Some(redact(&e, password.as_deref())))
             }
-        })?;
-        let after = parse_mounts(&r[r.len() - 2], &r[r.len() - 1])
-            .mounts
-            .into_iter()
-            .find(|m| m.name == name);
+            Err(e) => return Err(e),
+        };
         Ok(HaMountRepair {
             dry_run: false,
             mount: name.to_string(),
             plan: steps,
             before,
             after,
+            applied,
+            reload_error,
+            warnings: self.warnings(),
+        })
+    }
+
+    pub async fn mount_heal(&self, execute: bool) -> Result<HaMountHeal> {
+        let (mounts, resolution) = self.mounts_raw().await?;
+        let targets: Vec<HaMount> = parse_mounts(&mounts, &resolution)
+            .mounts
+            .into_iter()
+            .filter(needs_heal)
+            .collect();
+        let plan = targets
+            .iter()
+            .map(|m| format!("POST /mounts/{}/reload", m.name))
+            .collect();
+        if !execute || targets.is_empty() {
+            return Ok(HaMountHeal {
+                dry_run: !execute,
+                plan,
+                mounts: targets
+                    .into_iter()
+                    .map(|before| HaMountHealed {
+                        mount: before.name.clone(),
+                        before,
+                        after: None,
+                        error: None,
+                    })
+                    .collect(),
+                warnings: self.warnings(),
+            });
+        }
+        let mut errors = Vec::with_capacity(targets.len());
+        for m in &targets {
+            let reload = supervisor(&format!("/mounts/{}/reload", m.name), "post", None);
+            errors.push(
+                self.ws_requests(&[reload])
+                    .await
+                    .err()
+                    .map(|e| format!("{e:#}")),
+            );
+        }
+        let now = self.mounts_raw().await.ok();
+        let healed = targets
+            .into_iter()
+            .zip(errors)
+            .map(|(before, error)| HaMountHealed {
+                mount: before.name.clone(),
+                after: now
+                    .as_ref()
+                    .and_then(|(m, r)| find_mount(parse_mounts(m, r), &before.name)),
+                before,
+                error,
+            })
+            .collect();
+        Ok(HaMountHeal {
+            dry_run: false,
+            plan,
+            mounts: healed,
             warnings: self.warnings(),
         })
     }
@@ -621,12 +745,8 @@ mod tests {
     #[test]
     fn cifs_update_resolves_password_from_secret_ref() {
         let mut replies = session(vec![mounts(), resolution()]);
-        replies.extend(session(vec![
-            Value::Null,
-            Value::Null,
-            mounts(),
-            resolution(),
-        ]));
+        replies.extend(session(vec![Value::Null]));
+        replies.extend(session(vec![Value::Null, mounts(), resolution()]));
         let (s, calls) = sink(replies);
         let change = MountChange {
             password_secret: Some("homeassistant.willow.smb".into()),
@@ -709,5 +829,94 @@ mod tests {
             assert!(mount_name(bad).is_err(), "{bad}");
         }
         assert!(find_raw(&mounts(), "nope").is_err());
+    }
+
+    fn failed_session(message: &str) -> Vec<Value> {
+        vec![
+            json!({"t": "open", "session": 1}),
+            frame(json!({"type": "auth_required"})),
+            Value::Null,
+            frame(json!({"type": "auth_ok"})),
+            Value::Null,
+            frame(json!({"id": 1, "type": "result", "success": false,
+                "error": {"message": message}})),
+            Value::Null,
+        ]
+    }
+
+    #[test]
+    fn applied_update_with_failed_reload_reports_partial_result() {
+        let mut changed = mounts();
+        changed["mounts"][1]["server"] = json!("10.0.0.14");
+        changed["mounts"][1]["state"] = json!("failed");
+        let mut replies = session(vec![mounts(), resolution()]);
+        replies.extend(session(vec![Value::Null]));
+        replies.extend(failed_session("mount error n3w-pass rejected"));
+        replies.extend(session(vec![changed, resolution()]));
+        let (s, _) = sink(replies);
+        let change = MountChange {
+            server: Some("10.0.0.14".into()),
+            password_secret: Some("homeassistant.willow.smb".into()),
+            ..Default::default()
+        };
+        let r = with_cap_sink(s, || {
+            block_on(
+                client().mount_repair("willow_media", &change, true, |_| Ok("n3w-pass".into())),
+            )
+        })
+        .unwrap();
+        assert!(r.applied);
+        let err = r.reload_error.as_deref().unwrap();
+        assert!(
+            err.contains("<redacted>") && !err.contains("n3w-pass"),
+            "{err}"
+        );
+        assert_eq!(r.before.server, "10.0.0.12");
+        let after = r.after.unwrap();
+        assert_eq!(after.server, "10.0.0.14");
+        assert!(after.failed);
+    }
+
+    #[test]
+    fn heal_defaults_to_plan_and_targets_only_unhealthy_mounts() {
+        let (s, calls) = sink(session(vec![mounts(), resolution()]));
+        let r = with_cap_sink(s, || block_on(client().mount_heal(false))).unwrap();
+        assert!(r.dry_run);
+        assert_eq!(r.plan, ["POST /mounts/maple_backups/reload"]);
+        assert!(sent(&calls)
+            .iter()
+            .all(|m| m["method"].is_null() || m["method"] == "get"));
+    }
+
+    #[test]
+    fn heal_reloads_unhealthy_mounts_and_is_noop_when_healthy() {
+        let mut healthy = mounts();
+        healthy["mounts"][0]["state"] = json!("active");
+        let mut replies = session(vec![mounts(), resolution()]);
+        replies.extend(session(vec![Value::Null]));
+        replies.extend(session(vec![
+            healthy.clone(),
+            json!({"issues": [], "suggestions": []}),
+        ]));
+        let (s, calls) = sink(replies);
+        let r = with_cap_sink(s, || block_on(client().mount_heal(true))).unwrap();
+        assert!(!r.dry_run);
+        assert_eq!(r.mounts.len(), 1);
+        assert!(r.mounts[0].error.is_none());
+        assert!(!r.mounts[0].after.as_ref().unwrap().failed);
+        assert_eq!(
+            sent(&calls)[4],
+            json!({"id": 1, "type": "supervisor/api", "endpoint": "/mounts/maple_backups/reload", "method": "post"})
+        );
+
+        let (s, calls) = sink(session(vec![
+            healthy,
+            json!({"issues": [], "suggestions": []}),
+        ]));
+        let r = with_cap_sink(s, || block_on(client().mount_heal(true))).unwrap();
+        assert!(r.mounts.is_empty() && r.plan.is_empty());
+        assert!(sent(&calls)
+            .iter()
+            .all(|m| m["method"].is_null() || m["method"] == "get"));
     }
 }

@@ -245,6 +245,28 @@ async fn ha_mount_repair(
         .await
 }
 
+#[orca_struct(args)]
+pub struct HaMountHealArgs {
+    /// Registered endpoint name.
+    #[arg(long)]
+    pub endpoint: String,
+    /// Reload the unhealthy mounts. Without it the tool only returns the plan.
+    #[arg(long)]
+    #[serde(default)]
+    pub execute: bool,
+}
+
+/// [SENSITIVE] [MUTATES STATE] Reload every Supervisor mount that is failed or not active; healthy mounts are left alone.
+/// Returns the plan only unless `execute` is set.
+#[orca_tool(domain = "home-assistant", verb = "mount-heal", role = "admin")]
+async fn ha_mount_heal(
+    args: HaMountHealArgs,
+    ctx: &ToolCtx,
+) -> Result<crate::supervisor::HaMountHeal> {
+    crate::authz::require_admin(ctx)?;
+    make_client(&args.endpoint)?.mount_heal(args.execute).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +302,21 @@ mod tests {
             assert_refused(&ha_mount_repair(args(), &ctx(role)).await.unwrap_err());
         }
         let err = ha_mount_repair(args(), &ctx(Some("admin")))
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains("admin role required"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn mount_heal_requires_admin() {
+        let args = || HaMountHealArgs {
+            endpoint: "ha".into(),
+            execute: false,
+        };
+        for role in [Some("user"), Some("viewer"), None] {
+            assert_refused(&ha_mount_heal(args(), &ctx(role)).await.unwrap_err());
+        }
+        let err = ha_mount_heal(args(), &ctx(Some("admin")))
             .await
             .unwrap_err();
         assert!(!err.to_string().contains("admin role required"), "{err}");
