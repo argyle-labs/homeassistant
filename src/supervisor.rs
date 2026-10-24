@@ -394,7 +394,7 @@ impl Client {
         name: &str,
         change: &MountChange,
         execute: bool,
-        resolve: impl Fn(&str) -> Result<String>,
+        resolve: impl Fn(&str) -> Result<plugin_toolkit::secrets::Secret<String>>,
     ) -> Result<HaMountRepair> {
         let name = mount_name(name)?;
         let (mounts, resolution) = self.mounts_raw().await?;
@@ -434,11 +434,18 @@ impl Client {
             let put = supervisor(
                 &format!("/mounts/{name}"),
                 "put",
-                Some(update_body(&raw, change, password.clone())?),
+                Some(update_body(
+                    &raw,
+                    change,
+                    password.as_ref().map(|p| p.expose_secret().clone()),
+                )?),
             );
-            self.ws_requests(&[put])
-                .await
-                .map_err(|e| anyhow!(redact(&e, password.as_deref())))?;
+            self.ws_requests(&[put]).await.map_err(|e| {
+                anyhow!(redact(
+                    &e,
+                    password.as_ref().map(|p| p.expose_secret().as_str())
+                ))
+            })?;
             applied = true;
         }
         let msgs = [
@@ -454,7 +461,13 @@ impl Client {
                     .await
                     .ok()
                     .and_then(|(m, r)| find_mount(parse_mounts(&m, &r), name));
-                (after, Some(redact(&e, password.as_deref())))
+                (
+                    after,
+                    Some(redact(
+                        &e,
+                        password.as_ref().map(|p| p.expose_secret().as_str()),
+                    )),
+                )
             }
             Err(e) => return Err(e),
         };
@@ -685,7 +698,7 @@ mod tests {
         );
     }
 
-    fn no_secret(_: &str) -> Result<String> {
+    fn no_secret(_: &str) -> Result<plugin_toolkit::secrets::Secret<String>> {
         panic!("secret resolved on a dry run")
     }
 
@@ -756,7 +769,7 @@ mod tests {
             block_on(
                 client().mount_repair("willow_media", &change, true, |name| {
                     assert_eq!(name, "homeassistant.willow.smb");
-                    Ok("n3w-pass".into())
+                    Ok(plugin_toolkit::secrets::Secret::new("n3w-pass".to_string()))
                 }),
             )
         })
@@ -795,9 +808,9 @@ mod tests {
             ..Default::default()
         };
         let err = with_cap_sink(s, || {
-            block_on(
-                client().mount_repair("willow_media", &change, true, |_| Ok("n3w-pass".into())),
-            )
+            block_on(client().mount_repair("willow_media", &change, true, |_| {
+                Ok(plugin_toolkit::secrets::Secret::new("n3w-pass".to_string()))
+            }))
         })
         .unwrap_err();
         assert!(!format!("{err:#}").contains("n3w-pass"), "{err:#}");
@@ -860,9 +873,9 @@ mod tests {
             ..Default::default()
         };
         let r = with_cap_sink(s, || {
-            block_on(
-                client().mount_repair("willow_media", &change, true, |_| Ok("n3w-pass".into())),
-            )
+            block_on(client().mount_repair("willow_media", &change, true, |_| {
+                Ok(plugin_toolkit::secrets::Secret::new("n3w-pass".to_string()))
+            }))
         })
         .unwrap();
         assert!(r.applied);

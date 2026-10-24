@@ -240,7 +240,7 @@ async fn ha_mount_repair(
     };
     make_client(&args.endpoint)?
         .mount_repair(&args.mount, &change, args.execute, |name| {
-            plugin_toolkit::secrets::get_required(name).map(|s| s.expose_secret().clone())
+            plugin_toolkit::secrets::get_required(name)
         })
         .await
 }
